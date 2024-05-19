@@ -1,13 +1,33 @@
 use byteorder::{BigEndian, ByteOrder};
+use crate::state::Shard;
 
 pub fn server_list_packet() -> [u8; 46] {
+    let shards = vec![
+        Shard::new(String::from("My Shard")),
+    ];
+
+    let mut src = vec![];
+
+    src.push(0xA8); // packet ID
+    src.append(&mut vec![0x00, 0x2E]); // packet length
+    src.push(0x00); // flags
+
+    let server_count = shards.len() as u16;
+    src.append(&mut server_count.to_be_bytes().into());
+
+    for shard in shards {
+    }
+    let server_index: u16 = 0;
+    src.append(&mut server_index.to_be_bytes().into());
+
     let mut buffer: [u8; 46] = [0; 46];
 
     buffer[0] = 0xA8; // packet ID
 
+    buffer[1] = 0x00; // packet length
     buffer[2] = 0x2E; // packet length
 
-    buffer[3] = 0x00; // flags (unused, ServUO uses 0x5D
+    buffer[3] = 0x00; // flags (unused, ServUO uses 0x5D)
 
     BigEndian::write_u16(&mut buffer[4..6], 1); // server count
 

@@ -41,3 +41,21 @@ impl State for Monster {
         }
     }
 }
+
+pub struct Shard {
+    name: String,
+    percent_full: u8,
+    timezone: u8,
+    address: [u8; 4],
+}
+
+impl Shard {
+    pub fn new(name: String) -> Shard {
+        Shard {
+            name,
+            percent_full: 0, // TODO: check what range this can be
+            timezone: 0x00, // TODO: look up server timezone from OS
+            address: [127, 0, 0, 1],
+        }
+    }
+}
