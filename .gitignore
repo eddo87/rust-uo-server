@@ -1,2 +1,38 @@
-.claude
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock for binaries should be committed (already is)
+# Cargo.lock
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Server runtime data
+/saves/
+/logs/
+/backups/
+
+# UO data files (large binaries, not part of source)
+*.mul
+*.idx
+*.uop
+
+# OS generated
+desktop.ini
+ehthumbs.db
