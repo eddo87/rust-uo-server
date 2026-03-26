@@ -1,0 +1,16 @@
+# Rust UO Server Configuration
+# All values shown below are the defaults.
+# Uncomment and modify any setting to customize your server.
+
+[network]
+# bind_address = "127.0.0.1"
+# port = 2593
+# max_connections = 100
+
+[shard]
+# name = "My Shard"
+# max_characters = 7
+
+[game]
+# starting_city = "Britain"
+# max_hitpoints = 100
