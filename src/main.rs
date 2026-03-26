@@ -1,22 +1,58 @@
-use std::thread;
+use log::{error, info};
 use std::time::Duration;
 
+pub mod error;
+pub mod config;
 mod huffman;
-mod state;
+pub mod state;
 mod tcp;
 mod test_timers;
 mod ticks;
-mod timer;
+pub mod timer;
+pub mod shutdown;
+pub mod connection;
+pub mod connections;
+pub mod movement;
+pub mod speech;
+pub mod world;
+pub mod item;
+pub mod inventory;
+pub mod character;
+pub mod persistence;
+pub mod packets;
+pub mod mobile;
+pub mod combat;
+pub mod encryption;
+pub mod packet_validation;
+pub mod skills;
 
 fn main() {
+    env_logger::init();
+    info!("Starting rust-uo-server");
+
+    let shutdown = shutdown::ShutdownSignal::new();
+
+    let ctrlc_shutdown = shutdown.clone();
+    ctrlc::set_handler(move || {
+        info!("Shutdown signal received (Ctrl+C)");
+        ctrlc_shutdown.request_shutdown();
+    })
+    .expect("Failed to set Ctrl+C handler");
+
     let timer_register_tx = timer::start();
-    test_timers::start(timer_register_tx);
+
+    if let Err(e) = test_timers::start(timer_register_tx) {
+        error!("Error starting test timers: {}", e);
+    }
 
     if let Err(e) = tcp::start() {
-        println!("Error from TCP: {:?}", e);
+        error!("Error from TCP: {}", e);
     }
 
-    loop {
-        thread::sleep(Duration::from_secs(60));
-    }
+    info!("Server is running. Press Ctrl+C to shut down.");
+    shutdown.wait_for_shutdown(Duration::from_millis(100));
+
+    info!("Shutting down: allowing in-flight connections to finish...");
+    std::thread::sleep(Duration::from_secs(2));
+    info!("Server shut down gracefully.");
 }

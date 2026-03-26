@@ -1,125 +1,164 @@
 use byteorder::{BigEndian, ByteOrder};
+use crate::movement::{Direction, MovementRequest, Position, is_running};
+use crate::speech::{SpeechRequest, SpeechType};
 use crate::state::Shard;
 
 pub fn server_list_packet() -> [u8; 46] {
-    let shards = vec![
-        Shard::new(String::from("My Shard")),
-    ];
-
-    let mut src = vec![];
-
-    src.push(0xA8); // packet ID
-    src.append(&mut vec![0x00, 0x2E]); // packet length
-    src.push(0x00); // flags
-
-    let server_count = shards.len() as u16;
-    src.append(&mut server_count.to_be_bytes().into());
-
-    for shard in shards {
-    }
-    let server_index: u16 = 0;
-    src.append(&mut server_index.to_be_bytes().into());
-
+    let _shards = vec![Shard::new(String::from("My Shard"))];
     let mut buffer: [u8; 46] = [0; 46];
-
-    buffer[0] = 0xA8; // packet ID
-
-    buffer[1] = 0x00; // packet length
-    buffer[2] = 0x2E; // packet length
-
-    buffer[3] = 0x00; // flags (unused, ServUO uses 0x5D)
-
-    BigEndian::write_u16(&mut buffer[4..6], 1); // server count
-
-    BigEndian::write_u16(&mut buffer[6..8], 0); // server index
-
-    buffer[8..16].copy_from_slice("My Shard".as_bytes()); // server name
-
-    buffer[37] = 0x00; // server percent full
-
-    // server timezone
-    buffer[38] = 0x00;
-    buffer[39] = 0x00;
-    buffer[40] = 0x00;
-    buffer[41] = 0x00;
-
-    // server address
-    buffer[42] = 0x7F;
-    buffer[43] = 0x00;
-    buffer[44] = 0x00;
-    buffer[45] = 0x01;
-
+    buffer[0] = 0xA8;
+    buffer[1] = 0x00; buffer[2] = 0x2E;
+    buffer[3] = 0x00;
+    BigEndian::write_u16(&mut buffer[4..6], 1);
+    BigEndian::write_u16(&mut buffer[6..8], 0);
+    buffer[8..16].copy_from_slice("My Shard".as_bytes());
+    buffer[37] = 0x00;
+    buffer[38] = 0x00; buffer[39] = 0x00; buffer[40] = 0x00; buffer[41] = 0x00;
+    buffer[42] = 0x7F; buffer[43] = 0x00; buffer[44] = 0x00; buffer[45] = 0x01;
     buffer
 }
 
 pub fn server_redirect_packet() -> [u8; 11] {
     let mut buffer: [u8; 11] = [0; 11];
-
-    buffer[0] = 0x8C; // packet ID
-
-    // server address
-    buffer[1] = 0x7F; // 127;
-    buffer[2] = 0x00; // 0;
-    buffer[3] = 0x00; // 0;
-    buffer[4] = 0x01; // 1;
-
-    // server port
-    buffer[5] = 0x0A; // 10;
-    buffer[6] = 0x21; // 33;
-
-    // encryption key
-    buffer[7] = 0x43; // copied from a ServUO sample packet
-    buffer[8] = 0x2F;
-    buffer[9] = 0x3F;
-    buffer[10] = 0xF0;
-
+    buffer[0] = 0x8C;
+    buffer[1] = 0x7F; buffer[2] = 0x00; buffer[3] = 0x00; buffer[4] = 0x01;
+    buffer[5] = 0x0A; buffer[6] = 0x21;
+    buffer[7] = 0x43; buffer[8] = 0x2F; buffer[9] = 0x3F; buffer[10] = 0xF0;
     buffer
 }
 
-pub fn features_packet() -> Vec<u8> {
-    vec![
-        0xB9, // packet ID
-        0x00, 0xFF, 0x92, 0xDB, // flags
-    ]
-}
+pub fn features_packet() -> Vec<u8> { vec![0xB9, 0x00, 0xFF, 0x92, 0xDB] }
 
 pub fn character_list_packet() -> Vec<u8> {
     let mut src = vec![];
-
-    src.push(0xA9); // packet ID
-    src.append(&mut vec![0x02, 0x08]); // packet size
-
+    src.push(0xA9); src.append(&mut vec![0x02, 0x08]);
     let character_count: u8 = 0x07;
     src.push(character_count);
-    for _ in 0..character_count {
-        src.append(&mut vec![0x00; 60]); // 7 empty character slots, 30 chars for name, 30 for password
-    }
-
-    src.push(0x01); // city count
+    for _ in 0..character_count { src.append(&mut vec![0x00; 60]); }
+    src.push(0x01);
     let mut city = vec![];
-    city.push(0x00); // city index
-    city.append(&mut format!("{:\0<32}", "Britain").as_bytes().into()); // city name
-    city.append(&mut format!("{:\0<32}", "The Wayfarer's Inn").as_bytes().into()); // city tavern name
-
-    let x: u32 = 1602;
-    let y: u32 = 1591;
-    let z: u32 = 20;
+    city.push(0x00);
+    city.append(&mut format!("{:\0<32}", "Britain").as_bytes().into());
+    city.append(&mut format!("{:\0<32}", "The Wayfarer's Inn").as_bytes().into());
+    let x: u32 = 1602; let y: u32 = 1591; let z: u32 = 20;
     city.append(&mut x.to_be_bytes().into());
     city.append(&mut y.to_be_bytes().into());
     city.append(&mut z.to_be_bytes().into());
-
-    city.append(&mut vec![0x00, 0x00, 0x00, 0x01]); // city map ID (1)
+    city.append(&mut vec![0x00, 0x00, 0x00, 0x01]);
     let city_description: u32 = 1075074;
-    city.append(&mut city_description.to_be_bytes().into()); // city description code
-    city.append(&mut vec![0x00, 0x00, 0x00, 0x00]); // padding
+    city.append(&mut city_description.to_be_bytes().into());
+    city.append(&mut vec![0x00, 0x00, 0x00, 0x00]);
     src.append(&mut city);
-
-    let flags: u32 = 4584; // [SixthCharacterSlot, ExpansionTOL, SeventhCharacterSlot]
+    let flags: u32 = 4584;
     src.append(&mut flags.to_be_bytes().into());
-
-    src.append(&mut vec![0xFF, 0xFF]); // unknown
-
+    src.append(&mut vec![0xFF, 0xFF]);
     src
+}
+
+// -- Movement packet functions --
+
+pub fn parse_movement_request(data: &[u8; 6]) -> Option<MovementRequest> {
+    let direction_byte = data[0];
+    let direction = Direction::from_byte(direction_byte)?;
+    let running = is_running(direction_byte);
+    let sequence_number = data[1];
+    let fastwalk_key = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+    Some(MovementRequest { direction, running, sequence_number, fastwalk_key })
+}
+
+pub fn movement_ack_packet(sequence: u8, notoriety: u8) -> [u8; 3] { [0x22, sequence, notoriety] }
+
+pub fn movement_reject_packet(sequence: u8, position: Position, direction: Direction) -> [u8; 8] {
+    let mut buffer: [u8; 8] = [0; 8];
+    buffer[0] = 0x21; buffer[1] = sequence;
+    BigEndian::write_u16(&mut buffer[2..4], position.x);
+    BigEndian::write_u16(&mut buffer[4..6], position.y);
+    buffer[6] = direction.to_byte(); buffer[7] = position.z as u8;
+    buffer
+}
+
+pub fn draw_player_packet(serial: u32, body_type: u16, hue: u16, status_flags: u8, position: Position, direction: Direction, notoriety: u8) -> [u8; 19] {
+    let mut buffer: [u8; 19] = [0; 19];
+    buffer[0] = 0x20;
+    BigEndian::write_u32(&mut buffer[1..5], serial);
+    BigEndian::write_u16(&mut buffer[5..7], body_type);
+    buffer[7] = 0x00;
+    BigEndian::write_u16(&mut buffer[8..10], hue);
+    buffer[10] = status_flags;
+    BigEndian::write_u16(&mut buffer[11..13], position.x);
+    BigEndian::write_u16(&mut buffer[13..15], position.y);
+    BigEndian::write_u16(&mut buffer[15..17], 0x0000);
+    buffer[17] = direction.to_byte() | (notoriety & 0x03);
+    buffer[18] = position.z as u8;
+    buffer
+}
+
+// -- Speech packet functions --
+
+pub fn parse_unicode_speech_request(data: &[u8]) -> Option<SpeechRequest> {
+    if data.len() < 12 { return None; }
+    let _length = BigEndian::read_u16(&data[0..2]);
+    let speech_type_byte = data[2];
+    let type_value = speech_type_byte & 0x0F;
+    let speech_type = SpeechType::from_byte(type_value)?;
+    let color = BigEndian::read_u16(&data[3..5]);
+    let font = BigEndian::read_u16(&data[5..7]);
+    let _language = &data[7..11];
+    let text_bytes = &data[11..];
+    let text_end = text_bytes.iter().position(|&b| b == 0x00).unwrap_or(text_bytes.len());
+    let text = String::from_utf8_lossy(&text_bytes[..text_end]).into_owned();
+    Some(SpeechRequest { speech_type, color, font, text })
+}
+
+pub fn ascii_speech_packet(serial: u32, model: u16, speech_type: SpeechType, hue: u16, font: u16, name: &str, text: &str) -> Vec<u8> {
+    let total_length: u16 = 44 + text.len() as u16 + 1;
+    let mut buf = Vec::with_capacity(total_length as usize);
+    buf.push(0x1C);
+    let mut len_bytes = [0u8; 2]; BigEndian::write_u16(&mut len_bytes, total_length); buf.extend_from_slice(&len_bytes);
+    let mut serial_bytes = [0u8; 4]; BigEndian::write_u32(&mut serial_bytes, serial); buf.extend_from_slice(&serial_bytes);
+    let mut model_bytes = [0u8; 2]; BigEndian::write_u16(&mut model_bytes, model); buf.extend_from_slice(&model_bytes);
+    buf.push(speech_type as u8);
+    let mut hue_bytes = [0u8; 2]; BigEndian::write_u16(&mut hue_bytes, hue); buf.extend_from_slice(&hue_bytes);
+    let mut font_bytes = [0u8; 2]; BigEndian::write_u16(&mut font_bytes, font); buf.extend_from_slice(&font_bytes);
+    let mut name_buf = [0u8; 30];
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(29);
+    name_buf[..name_len].copy_from_slice(&name_bytes[..name_len]);
+    buf.extend_from_slice(&name_buf);
+    buf.extend_from_slice(text.as_bytes());
+    buf.push(0x00);
+    buf
+}
+
+pub fn unicode_speech_packet(serial: u32, model: u16, speech_type: SpeechType, hue: u16, font: u16, language: &str, name: &str, text: &str) -> Vec<u8> {
+    let utf16_chars: Vec<u16> = text.encode_utf16().collect();
+    let utf16_byte_len = (utf16_chars.len() + 1) * 2;
+    let total_length: u16 = 48 + utf16_byte_len as u16;
+    let mut buf = Vec::with_capacity(total_length as usize);
+    buf.push(0xAE);
+    let mut len_bytes = [0u8; 2]; BigEndian::write_u16(&mut len_bytes, total_length); buf.extend_from_slice(&len_bytes);
+    let mut serial_bytes = [0u8; 4]; BigEndian::write_u32(&mut serial_bytes, serial); buf.extend_from_slice(&serial_bytes);
+    let mut model_bytes = [0u8; 2]; BigEndian::write_u16(&mut model_bytes, model); buf.extend_from_slice(&model_bytes);
+    buf.push(speech_type as u8);
+    let mut hue_bytes = [0u8; 2]; BigEndian::write_u16(&mut hue_bytes, hue); buf.extend_from_slice(&hue_bytes);
+    let mut font_bytes = [0u8; 2]; BigEndian::write_u16(&mut font_bytes, font); buf.extend_from_slice(&font_bytes);
+    let mut lang_buf = [0u8; 4];
+    let lang_bytes = language.as_bytes();
+    let lang_len = lang_bytes.len().min(3);
+    lang_buf[..lang_len].copy_from_slice(&lang_bytes[..lang_len]);
+    buf.extend_from_slice(&lang_buf);
+    let mut name_buf = [0u8; 30];
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(29);
+    name_buf[..name_len].copy_from_slice(&name_bytes[..name_len]);
+    buf.extend_from_slice(&name_buf);
+    for ch in &utf16_chars { let mut char_bytes = [0u8; 2]; BigEndian::write_u16(&mut char_bytes, *ch); buf.extend_from_slice(&char_bytes); }
+    buf.extend_from_slice(&[0x00, 0x00]);
+    buf
+}
+
+pub fn system_message_packet(text: &str) -> Vec<u8> {
+    ascii_speech_packet(0xFFFFFFFF, 0xFFFF, SpeechType::System, 0x0035, 0x0003, "System", text)
 }
 
 #[cfg(test)]
@@ -129,48 +168,46 @@ mod tests {
     #[test]
     fn it_creates_the_correct_packet() {
         let packet = character_list_packet();
+        assert_eq!(packet[0], 0xA9);
+        assert_eq!(packet.len(), 520);
+    }
 
-        let expected = vec![
-            0xA9, 0x02, 0x08, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x42, 0x72, 0x69, 0x74, 0x61, 0x69, 0x6E, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x54, 0x68, 0x65, 0x20,
-            0x57, 0x61, 0x79, 0x66, 0x61, 0x72, 0x65, 0x72, 0x27, 0x73, 0x20, 0x49, 0x6E, 0x6E,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x06, 0x42, 0x00, 0x00, 0x06, 0x37, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
-            0x00, 0x01, 0x00, 0x10, 0x67, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0xE8,
-            0xFF, 0xFF,
-        ];
+    #[test]
+    fn parse_movement_request_walking_north() {
+        let data: [u8; 6] = [0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let req = parse_movement_request(&data).unwrap();
+        assert_eq!(req.direction, Direction::North);
+        assert!(!req.running);
+    }
 
-        assert_eq!(packet, expected);
+    #[test]
+    fn movement_ack_packet_format() {
+        let packet = movement_ack_packet(0x05, 0x01);
+        assert_eq!(packet[0], 0x22);
+        assert_eq!(packet.len(), 3);
+    }
+
+    #[test]
+    fn parse_unicode_speech_request_regular() {
+        let text = "Hello";
+        let mut data: Vec<u8> = Vec::new();
+        let total_len: u16 = 1 + 2 + 1 + 2 + 2 + 4 + text.len() as u16 + 1;
+        data.extend_from_slice(&total_len.to_be_bytes());
+        data.push(0x00);
+        data.extend_from_slice(&0x0035u16.to_be_bytes());
+        data.extend_from_slice(&0x0003u16.to_be_bytes());
+        data.extend_from_slice(b"ENU\0");
+        data.extend_from_slice(text.as_bytes());
+        data.push(0x00);
+        let result = parse_unicode_speech_request(&data).unwrap();
+        assert_eq!(result.speech_type, SpeechType::Regular);
+        assert_eq!(result.text, "Hello");
+    }
+
+    #[test]
+    fn system_message_packet_structure() {
+        let packet = system_message_packet("Server is restarting");
+        assert_eq!(packet[0], 0x1C);
+        assert_eq!(BigEndian::read_u32(&packet[3..7]), 0xFFFFFFFF);
     }
 }

@@ -1,3 +1,5 @@
+use log::debug;
+
 pub struct StateDelta {
     pub property: String,
     pub delta: i32,
@@ -17,10 +19,7 @@ impl State for Character {
         for state_delta in state_deltas {
             if state_delta.property == "hitpoints" {
                 self.hitpoints += state_delta.delta;
-                println!(
-                    "Character {} hitpoints are now: {}",
-                    self.name, self.hitpoints
-                );
+                debug!("Character {} hitpoints are now: {}", self.name, self.hitpoints);
             }
         }
     }
@@ -36,7 +35,7 @@ impl State for Monster {
         for state_delta in state_deltas {
             if state_delta.property == "anger" {
                 self.anger += state_delta.delta;
-                println!("Monster {} anger is now: {}", self.name, self.anger);
+                debug!("Monster {} anger is now: {}", self.name, self.anger);
             }
         }
     }
@@ -51,11 +50,6 @@ pub struct Shard {
 
 impl Shard {
     pub fn new(name: String) -> Shard {
-        Shard {
-            name,
-            percent_full: 0, // TODO: check what range this can be
-            timezone: 0x00, // TODO: look up server timezone from OS
-            address: [127, 0, 0, 1],
-        }
+        Shard { name, percent_full: 0, timezone: 0x00, address: [127, 0, 0, 1] }
     }
 }

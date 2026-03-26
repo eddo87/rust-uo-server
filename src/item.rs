@@ -58,7 +58,7 @@ impl Default for ItemFlags {
 }
 
 /// A single in-game item.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     /// Globally unique serial number.
     pub serial: Serial,

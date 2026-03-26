@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn roundtrip_empty_input() {
         let result = roundtrip(&[]);
-        assert_eq!(result, vec![]);
+        assert_eq!(result, Vec::<u8>::new());
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
     fn decompress_empty_data() {
         let decompressor = Decompressor::new(vec![]);
         let result = decompressor.decompress();
-        assert_eq!(result, vec![]);
+        assert_eq!(result, Vec::<u8>::new());
     }
 
     #[test]
