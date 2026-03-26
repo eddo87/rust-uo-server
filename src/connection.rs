@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::character::Character;
 use crate::movement::Position;
 use crate::ticks;
 
@@ -94,6 +95,10 @@ pub struct Connection {
     pub war_mode: bool,
     /// Unique serial number for this player's mobile, used in UO packets.
     pub serial: u32,
+    /// Full character data (stats, HP, skills). Set on character select.
+    pub character: Option<Character>,
+    /// Serial of the mobile this player is currently targeting for combat.
+    pub target_serial: Option<u32>,
 }
 
 impl Connection {
@@ -112,6 +117,8 @@ impl Connection {
             move_sequence: 0,
             war_mode: false,
             serial: (id as u32).wrapping_add(1),
+            character: None,
+            target_serial: None,
         }
     }
 

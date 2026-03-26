@@ -235,6 +235,17 @@ pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
     Some((slot, name))
 }
 
+/// Builds a Damage notification packet (0x0B).
+///
+/// Sent to inform a client of damage taken.  7 bytes total.
+pub fn damage_notification_packet(serial: u32, damage: u16) -> [u8; 7] {
+    let mut buf = [0u8; 7];
+    buf[0] = 0x0B;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    BigEndian::write_u16(&mut buf[5..7], damage);
+    buf
+}
+
 /// Builds a Mobile Incoming packet (0x78).
 ///
 /// Sent to clients to introduce a new mobile (player or NPC) into their view.
@@ -542,6 +553,15 @@ mod tests {
     fn parse_speech_request_returns_none_for_wrong_id() {
         let data = vec![0x1C, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         assert!(parse_speech_request(&data).is_none());
+    }
+
+    #[test]
+    fn damage_notification_packet_structure() {
+        let pkt = damage_notification_packet(0xDEAD_BEEF, 42);
+        assert_eq!(pkt.len(), 7);
+        assert_eq!(pkt[0], 0x0B);
+        assert_eq!(&pkt[1..5], &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(&pkt[5..7], &[0x00, 0x2A]); // 42 in big-endian
     }
 
     #[test]

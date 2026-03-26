@@ -7,6 +7,8 @@ use async_std::{
     task,
 };
 use log::{debug, info, trace, warn};
+use crate::character::Character;
+use crate::combat::{ArmorStats, WeaponStats, WeaponType, resolve_combat_round};
 use crate::error::ServerError;
 use crate::huffman;
 use crate::connections::ConnectionManager;
@@ -31,6 +33,9 @@ fn required_packet_length(id: u8, buf: &[u8]) -> Option<usize> {
     match id {
         0x00 => Some(1),  // null padding: skip
         0x02 => Some(7),  // movement request
+        0x05 => Some(5),  // attack request
+        0x06 => Some(5),  // double-click (ignored for now)
+        0x09 => Some(5),  // single-click (ignored for now)
         0x5D => Some(73), // character select
         0x72 => Some(5),  // war mode (client → server)
         0x73 => Some(2),  // ping
@@ -249,14 +254,16 @@ async fn handle_packet(
             let serial = 0x00000001u32 + slot;
             let enter_pos = Position { x: 1496, y: 1628, z: 10 };
 
+            let character = Character::new_default(serial, char_name.clone());
             connections.with_connection_mut(conn_id, |c| {
                 c.set_character_name(char_name.clone());
                 c.set_position(enter_pos);
                 let _ = c.transition_to(ConnectionState::InGame);
+                c.character = Some(character.clone());
             });
             info!("Player entering game: {} (serial 0x{:08X})", char_name, serial);
 
-            send_login_init_sequence(conn_id, connections, serial);
+            send_login_init_sequence(conn_id, connections, &character);
 
             // Tell every nearby in-game player about the arriving player.
             let announce_pkt = packets::mobile_incoming_packet(
@@ -343,6 +350,116 @@ async fn handle_packet(
             }
         }
 
+        0x05 => {
+            // Attack request: [0x05, serial u32 BE]
+            if packet.len() < 5 { return Ok(()); }
+            let target_serial = u32::from_be_bytes([packet[1], packet[2], packet[3], packet[4]]);
+
+            // Record target and verify attacker is alive
+            let attacker_alive = connections
+                .with_connection_mut(conn_id, |c| {
+                    c.target_serial = Some(target_serial);
+                    c.character.as_ref().map(|ch| ch.is_alive).unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !attacker_alive { return Ok(()); }
+
+            // Locate target connection
+            let Some(target_id) = connections.find_by_serial(target_serial) else {
+                return Ok(());
+            };
+
+            // Collect attacker combat data (clone to release lock before touching target)
+            let attacker_snap = connections.get_connection(conn_id);
+            let Some(ref atk) = attacker_snap else { return Ok(()); };
+            let Some(ref atk_ch) = atk.character else { return Ok(()); };
+            if !atk_ch.is_alive { return Ok(()); }
+            let atk_pos = atk.position.unwrap_or(Position { x: 1496, y: 1628, z: 10 });
+            let atk_str = atk_ch.stats.strength;
+            let atk_skill = atk_ch.skills
+                .get(&crate::character::Skill::Wrestling)
+                .map(|e| e.value)
+                .unwrap_or(0.0);
+
+            // Collect target position for range check
+            let target_snap = connections.get_connection(target_id);
+            let Some(ref tgt) = target_snap else { return Ok(()); };
+            let Some(ref tgt_ch) = tgt.character else { return Ok(()); };
+            if !tgt_ch.is_alive { return Ok(()); }
+            let tgt_pos = tgt.position.unwrap_or(Position { x: 1496, y: 1628, z: 10 });
+            let tgt_skill = tgt_ch.skills
+                .get(&crate::character::Skill::Wrestling)
+                .map(|e| e.value)
+                .unwrap_or(0.0);
+            let tgt_name = tgt_ch.name.clone();
+
+            // Range check: melee requires Chebyshev distance ≤ 2
+            let dx = (atk_pos.x as i32 - tgt_pos.x as i32).unsigned_abs() as u16;
+            let dy = (atk_pos.y as i32 - tgt_pos.y as i32).unsigned_abs() as u16;
+            if dx > 2 || dy > 2 {
+                debug!("Attack out of range: {} → serial {}", conn_id, target_serial);
+                return Ok(());
+            }
+
+            // Resolve combat round (unarmed / fists)
+            let weapon = WeaponStats {
+                min_damage: 3,
+                max_damage: 8,
+                speed: 35,
+                weapon_type: WeaponType::Fists,
+                range: 1,
+            };
+            let armor = ArmorStats {
+                physical_resist: 0,
+                fire_resist: 0,
+                cold_resist: 0,
+                poison_resist: 0,
+                energy_resist: 0,
+            };
+            let result = resolve_combat_round(atk_skill, &weapon, atk_str, tgt_skill, &armor);
+
+            if result.was_hit {
+                // Apply damage to target
+                let (new_hp, max_hp, target_died) = connections
+                    .with_connection_mut(target_id, |c| {
+                        if let Some(ref mut ch) = c.character {
+                            ch.damage(result.damage_dealt);
+                            let hp = ch.derived_stats.hit_points;
+                            (hp.current, hp.max, !ch.is_alive)
+                        } else {
+                            (0, 0, false)
+                        }
+                    })
+                    .unwrap_or((0, 0, false));
+
+                info!(
+                    "Combat: conn {} hit {} for {} dmg (HP {}/{})",
+                    conn_id, tgt_name, result.damage_dealt, new_hp, max_hp
+                );
+
+                // Notify attacker of damage dealt (0x0B)
+                let dmg_pkt = packets::damage_notification_packet(target_serial, result.damage_dealt as u16);
+                connections.send_to(conn_id, compress_packet(&dmg_pkt));
+
+                // Send updated status bar to target and broadcast to nearby
+                if let Some(status_pkt) = build_status_packet_for(target_id, connections) {
+                    let compressed = compress_packet(&status_pkt);
+                    connections.send_to(target_id, compressed.clone());
+                    connections.broadcast_to_range(target_id, tgt_pos, 18, compressed);
+                }
+
+                if target_died {
+                    info!("Player {} died", tgt_name);
+                    // Tell the dead player's client to show the death screen
+                    connections.send_to(target_id, compress_packet(&[0x2C, 0x02]));
+                }
+            } else {
+                debug!("Combat: conn {} missed serial {}", conn_id, target_serial);
+            }
+        }
+
+        0x06 | 0x09 => { /* double/single click — ignored for now */ }
+
         0x72 => {
             // War mode toggle from client: [war_flag, unk, unk, unk]
             if !body.is_empty() {
@@ -402,13 +519,14 @@ fn compress_packet(src: &[u8]) -> Vec<u8> {
 }
 
 /// Enqueue the full in-game initialisation sequence for a newly-entered player.
-fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, serial: u32) {
+fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, ch: &Character) {
     use crate::status_packets::{StatBarData, StatusTypeFlag, build_status_bar_packet};
 
-    let x: u16 = 1496;
-    let y: u16 = 1628;
-    let z: i8 = 10;
-    let body: u16 = 0x0190; // male human
+    let serial = ch.serial;
+    let x = ch.position.0;
+    let y = ch.position.1;
+    let z = ch.position.2;
+    let body = ch.body_type;
     let map_width: u16 = 6144;
     let map_height: u16 = 4096;
 
@@ -419,14 +537,22 @@ fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, seria
     );
     debug!("Queued Login Confirm (0x1B)");
 
-    // 0x11 Status Bar
+    // 0x11 Status Bar (using real character stats)
+    let hp = &ch.derived_stats.hit_points;
+    let stam = &ch.derived_stats.stamina;
+    let mana = &ch.derived_stats.mana;
     let stat_data = StatBarData {
         serial,
-        name: "Player".to_string(),
-        hit_points: 100, max_hit_points: 100,
-        stamina: 100,    max_stamina: 100,
-        mana: 100,       max_mana: 100,
-        str_stat: 100,   dex_stat: 100,   int_stat: 100,
+        name: ch.name.clone(),
+        hit_points: hp.current as u16,
+        max_hit_points: hp.max as u16,
+        stamina: stam.current as u16,
+        max_stamina: stam.max as u16,
+        mana: mana.current as u16,
+        max_mana: mana.max as u16,
+        str_stat: ch.stats.strength as u16,
+        dex_stat: ch.stats.dexterity as u16,
+        int_stat: ch.stats.intelligence as u16,
         ..StatBarData::default()
     };
     connections.send_to(
@@ -437,14 +563,13 @@ fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, seria
 
     // 0x20 Draw Player
     let position = Position { x, y, z };
-    let draw_pkt = packets::draw_player_packet(serial, body, 0x0000, 0x00, position, Direction::North, 0x01);
+    let draw_pkt = packets::draw_player_packet(serial, body, ch.hue, 0x00, position, Direction::North, 0x01);
     connections.send_to(conn_id, compress_packet(&draw_pkt));
     debug!("Queued Draw Player (0x20)");
 
     // Lights
     connections.send_to(conn_id, compress_packet(&packets::global_light_level_packet(15)));
     connections.send_to(conn_id, compress_packet(&packets::personal_light_level_packet(serial, 15)));
-    debug!("Queued light level packets");
 
     // 0x72 War Mode (peace)
     connections.send_to(conn_id, compress_packet(&packets::war_mode_packet(false)));
@@ -454,6 +579,31 @@ fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, seria
     debug!("Queued Login Complete (0x55)");
 
     info!("In-game init sequence queued for serial 0x{:08X}", serial);
+}
+
+/// Build a 0x11 status-bar packet using the live character data for `conn_id`.
+fn build_status_packet_for(conn_id: u64, connections: &ConnectionManager) -> Option<Vec<u8>> {
+    use crate::status_packets::{StatBarData, StatusTypeFlag, build_status_bar_packet};
+    let conn = connections.get_connection(conn_id)?;
+    let ch = conn.character.as_ref()?;
+    let hp = &ch.derived_stats.hit_points;
+    let stam = &ch.derived_stats.stamina;
+    let mana = &ch.derived_stats.mana;
+    let data = StatBarData {
+        serial: ch.serial,
+        name: ch.name.clone(),
+        hit_points: hp.current as u16,
+        max_hit_points: hp.max as u16,
+        stamina: stam.current as u16,
+        max_stamina: stam.max as u16,
+        mana: mana.current as u16,
+        max_mana: mana.max as u16,
+        str_stat: ch.stats.strength as u16,
+        dex_stat: ch.stats.dexterity as u16,
+        int_stat: ch.stats.intelligence as u16,
+        ..StatBarData::default()
+    };
+    Some(build_status_bar_packet(&data, StatusTypeFlag::Basic))
 }
 
 // ---------------------------------------------------------------------------

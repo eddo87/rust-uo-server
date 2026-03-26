@@ -120,6 +120,16 @@ impl ConnectionManager {
     pub fn count(&self) -> usize {
         self.connections.lock().unwrap().len()
     }
+
+    /// Find the connection id for the connection whose serial matches.
+    pub fn find_by_serial(&self, serial: u32) -> Option<u64> {
+        self.connections
+            .lock()
+            .unwrap()
+            .values()
+            .find(|c| c.serial == serial)
+            .map(|c| c.id)
+    }
 }
 
 impl Default for ConnectionManager {
@@ -292,6 +302,17 @@ mod tests {
         assert!(mgr.send_to(id, vec![0x78, 0x00]));
         let pkt = rx.try_recv().expect("should have received packet");
         assert_eq!(pkt, vec![0x78, 0x00]);
+    }
+
+    #[test]
+    fn find_by_serial_returns_correct_id() {
+        let mgr = ConnectionManager::new();
+        let id = mgr.add_connection(addr(6000));
+        // serial is assigned as conn_id + 1 in Connection::new
+        let conn = mgr.get_connection(id).unwrap();
+        let serial = conn.serial;
+        assert_eq!(mgr.find_by_serial(serial), Some(id));
+        assert_eq!(mgr.find_by_serial(serial + 1000), None);
     }
 
     #[test]
