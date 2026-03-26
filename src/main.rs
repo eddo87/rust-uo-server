@@ -38,6 +38,8 @@ pub mod gump;
 pub mod events;
 pub mod commands;
 pub mod map_files;
+pub mod uop;
+pub mod data_files;
 pub mod loot;
 pub mod vendor;
 pub mod party;
@@ -67,7 +69,21 @@ fn main() {
         error!("Error starting test timers: {}", e);
     }
 
-    if let Err(e) = tcp::start() {
+    let uo_data_dir = std::env::var("UO_DATA_DIR")
+        .unwrap_or_else(|_| "C:/Program Files (x86)/Electronic Arts/Ultima Online Classic".to_string());
+    let data_files = data_files::DataFiles::new(&uo_data_dir);
+    match data_files.load_felucca() {
+        Ok(map) => info!(
+            "Felucca map loaded: {} MB of terrain data, {} bytes of statics index",
+            map.map_len() / 1024 / 1024,
+            map.map_len(),
+        ),
+        Err(e) => log::warn!("Could not load Felucca map data (set UO_DATA_DIR to fix): {}", e),
+    }
+
+    let connections = connections::ConnectionManager::new();
+
+    if let Err(e) = tcp::start(connections) {
         error!("Error from TCP: {}", e);
     }
 

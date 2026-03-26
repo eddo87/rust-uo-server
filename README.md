@@ -2,7 +2,7 @@
 
 A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server implementation written in Rust. UO is a fantasy MMORPG originally released in 1997 that still has an active community running free shards on open-source server implementations (most notably [ServUO](https://github.com/ServUO/ServUO) in C#). This project aims to provide a Rust alternative with strong type safety, memory safety, and the performance characteristics Rust is known for.
 
-> **Status:** Active development. 53 source files, ~20,800 lines of Rust, 799 tests passing.
+> **Status:** Active development. 57 source files, ~22,500 lines of Rust, 811 tests passing.
 
 ## Architecture
 
@@ -63,7 +63,9 @@ A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server
 | `combat` | UO combat formulas: hit chance, damage, armor reduction, swing delay |
 | `item` / `inventory` | Equipment layers, item flags, serial generation, recursive weight |
 | `world` | 6 UO maps, tile flags (32 bitflags), regions, spawn points |
-| `map_files` | Parser for UO `.mul` files (map terrain, statics, index) |
+| `map_files` | Parser for UO `.mul` files (map terrain, statics, index); `MapData::load_auto` handles both `.mul` and `.uop` |
+| `uop` | UOP LegacyMUL archive parser — extracts flat map terrain from `mapNLegacyMUL.uop` (newer UO clients) |
+| `data_files` | Startup loader: finds and loads all UO client data files; supports `UO_DATA_DIR` env override |
 | `spells` | All 64 magery spells across 8 circles with reagents and requirements |
 | `crafting` | 10 craft skills, 23 resources, recipes with success/exceptional chance |
 | `loot` | Drop tables with rarity tiers, gold ranges (5 pre-built tables) |
@@ -173,11 +175,11 @@ The original author has been documenting progress on a [public journal](https://
 - [x] Account management with access levels
 - [x] GM command system
 - [x] Event bus for game mechanics
+- [x] Wire game systems into the TCP packet loop (handle in-game packets end-to-end)
+- [x] Load UO map/art data files on startup (`.mul` + `.uop` LegacyMUL format)
 
 ### Next Steps
 
-- [ ] Wire game systems into the TCP packet loop (handle in-game packets end-to-end)
-- [ ] Load UO map/art data files on startup
 - [ ] Implement world persistence (save/load game state to disk)
 - [ ] Add pathfinding / movement validation using map data
 - [ ] Client version validation and feature gating

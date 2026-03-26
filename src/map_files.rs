@@ -246,6 +246,36 @@ impl MapData {
         })
     }
 
+    /// Load map data, trying the `.mul` path first and falling back to the
+    /// `LegacyMUL.uop` path when the plain `.mul` is absent (newer UO clients).
+    ///
+    /// `map_width` must be the **Y dimension** of the map in tiles (e.g. 4096
+    /// for Felucca) because UO stores blocks in column-major order where Y
+    /// varies fastest.  This value is used as the column stride.
+    pub fn load_auto(
+        map_mul_path: &str,
+        map_uop_path: &str,
+        staidx_path: &str,
+        statics_path: &str,
+        map_width: u32,
+    ) -> io::Result<Self> {
+        let map_data = if std::path::Path::new(map_mul_path).exists() {
+            std::fs::read(map_mul_path)?
+        } else {
+            crate::uop::load_legacy_mul(map_uop_path)?
+        };
+
+        let index_data = std::fs::read(staidx_path)?;
+        let statics_data = std::fs::read(statics_path)?;
+
+        Ok(Self {
+            map_data,
+            index_data,
+            statics_data,
+            map_width,
+        })
+    }
+
     /// Build directly from byte vectors (useful for tests).
     pub fn from_raw(
         map_data: Vec<u8>,
@@ -275,6 +305,11 @@ impl MapData {
             y,
             self.map_width,
         )
+    }
+
+    /// Return the size of the raw map terrain byte buffer.
+    pub fn map_len(&self) -> usize {
+        self.map_data.len()
     }
 
     /// Simple passability check: tile is passable if its z is above `min_z`

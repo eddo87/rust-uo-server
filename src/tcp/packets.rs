@@ -161,6 +161,73 @@ pub fn system_message_packet(text: &str) -> Vec<u8> {
     ascii_speech_packet(0xFFFFFFFF, 0xFFFF, SpeechType::System, 0x0035, 0x0003, "System", text)
 }
 
+// -- In-game init packet functions --
+
+/// 0x1B Login Confirm (37 bytes).
+///
+/// Sent immediately after character select to tell the client where the
+/// player is placed in the world.
+pub fn login_confirm_packet(serial: u32, body: u16, x: u16, y: u16, z: i8, dir: u8, map_width: u16, map_height: u16) -> [u8; 37] {
+    let mut buf = [0u8; 37];
+    buf[0] = 0x1B;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    // [5..9] unknown = 0
+    BigEndian::write_u16(&mut buf[9..11], body);
+    BigEndian::write_u16(&mut buf[11..13], x);
+    BigEndian::write_u16(&mut buf[13..15], y);
+    // [15..17] unknown = 0
+    buf[17] = z as u8;
+    buf[18] = dir;
+    // [19..25] unknown = 0
+    BigEndian::write_u16(&mut buf[25..27], map_width);
+    BigEndian::write_u16(&mut buf[27..29], map_height);
+    // [29..37] unknown = 0
+    buf
+}
+
+/// 0x55 Login Complete (1 byte).
+pub fn login_complete_packet() -> [u8; 1] {
+    [0x55]
+}
+
+/// 0x4F Overall Light Level (2 bytes).
+pub fn global_light_level_packet(level: u8) -> [u8; 2] {
+    [0x4F, level]
+}
+
+/// 0x4E Personal Light Level (6 bytes).
+pub fn personal_light_level_packet(serial: u32, level: u8) -> [u8; 6] {
+    let mut buf = [0u8; 6];
+    buf[0] = 0x4E;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    buf[5] = level;
+    buf
+}
+
+/// 0x72 War Mode (5 bytes).
+pub fn war_mode_packet(war: bool) -> [u8; 5] {
+    [0x72, war as u8, 0x00, 0x32, 0x00]
+}
+
+/// Parse a 0x5D Play Character packet body (72 bytes, packet ID already consumed).
+///
+/// Layout after the packet ID byte:
+/// - [0..4]   unknown pattern
+/// - [4..34]  character name (30 bytes, null-terminated)
+/// - [34..64] unknown
+/// - [64..68] character slot (uint32 BE)
+/// - [68..72] client IP
+///
+/// Returns `(slot, character_name)` or `None` if the data is too short.
+pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
+    if data.len() < 68 { return None; }
+    let slot = u32::from_be_bytes([data[64], data[65], data[66], data[67]]);
+    let name_bytes = &data[4..34];
+    let name_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(30);
+    let name = String::from_utf8_lossy(&name_bytes[..name_end]).into_owned();
+    Some((slot, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +276,70 @@ mod tests {
         let packet = system_message_packet("Server is restarting");
         assert_eq!(packet[0], 0x1C);
         assert_eq!(BigEndian::read_u32(&packet[3..7]), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn login_confirm_packet_structure() {
+        let pkt = login_confirm_packet(0x00000001, 0x0190, 1496, 1628, 10, 0x00, 6144, 4096);
+        assert_eq!(pkt.len(), 37);
+        assert_eq!(pkt[0], 0x1B);
+        assert_eq!(BigEndian::read_u32(&pkt[1..5]), 0x00000001);
+        assert_eq!(BigEndian::read_u16(&pkt[9..11]), 0x0190);
+        assert_eq!(BigEndian::read_u16(&pkt[11..13]), 1496);
+        assert_eq!(BigEndian::read_u16(&pkt[13..15]), 1628);
+        assert_eq!(pkt[17], 10u8);
+        assert_eq!(BigEndian::read_u16(&pkt[25..27]), 6144);
+        assert_eq!(BigEndian::read_u16(&pkt[27..29]), 4096);
+    }
+
+    #[test]
+    fn login_complete_packet_structure() {
+        let pkt = login_complete_packet();
+        assert_eq!(pkt, [0x55]);
+    }
+
+    #[test]
+    fn global_light_level_packet_structure() {
+        let pkt = global_light_level_packet(15);
+        assert_eq!(pkt, [0x4F, 15]);
+    }
+
+    #[test]
+    fn personal_light_level_packet_structure() {
+        let pkt = personal_light_level_packet(0xDEADBEEF, 20);
+        assert_eq!(pkt.len(), 6);
+        assert_eq!(pkt[0], 0x4E);
+        assert_eq!(BigEndian::read_u32(&pkt[1..5]), 0xDEADBEEF);
+        assert_eq!(pkt[5], 20);
+    }
+
+    #[test]
+    fn war_mode_packet_structure() {
+        let peace = war_mode_packet(false);
+        assert_eq!(peace, [0x72, 0x00, 0x00, 0x32, 0x00]);
+        let war = war_mode_packet(true);
+        assert_eq!(war[0], 0x72);
+        assert_eq!(war[1], 0x01);
+    }
+
+    #[test]
+    fn parse_character_select_valid() {
+        let mut data = vec![0u8; 72];
+        // slot = 2 at offset 64
+        data[64] = 0x00; data[65] = 0x00; data[66] = 0x00; data[67] = 0x02;
+        // name = "TestChar" at offset 4
+        let name = b"TestChar";
+        data[4..4 + name.len()].copy_from_slice(name);
+        let result = parse_character_select(&data);
+        assert!(result.is_some());
+        let (slot, name) = result.unwrap();
+        assert_eq!(slot, 2);
+        assert_eq!(name, "TestChar");
+    }
+
+    #[test]
+    fn parse_character_select_too_short() {
+        let data = vec![0u8; 60];
+        assert!(parse_character_select(&data).is_none());
     }
 }
