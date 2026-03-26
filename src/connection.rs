@@ -90,6 +90,10 @@ pub struct Connection {
     pub map_id: u8,
     /// Last acknowledged movement sequence number.
     pub move_sequence: u8,
+    /// Whether the player is currently in war mode.
+    pub war_mode: bool,
+    /// Unique serial number for this player's mobile, used in UO packets.
+    pub serial: u32,
 }
 
 impl Connection {
@@ -106,6 +110,8 @@ impl Connection {
             position: None,
             map_id: 0,
             move_sequence: 0,
+            war_mode: false,
+            serial: (id as u32).wrapping_add(1),
         }
     }
 
@@ -158,6 +164,11 @@ impl Connection {
     /// Record the last acknowledged movement sequence number.
     pub fn update_move_sequence(&mut self, seq: u8) {
         self.move_sequence = seq;
+    }
+
+    /// Set the player's war mode state.
+    pub fn set_war_mode(&mut self, war: bool) {
+        self.war_mode = war;
     }
 }
 

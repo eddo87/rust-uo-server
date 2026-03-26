@@ -235,6 +235,127 @@ pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
     Some((slot, name))
 }
 
+/// Builds a Mobile Incoming packet (0x78).
+///
+/// Sent to clients to introduce a new mobile (player or NPC) into their view.
+/// The item list is omitted (terminated immediately with 0x00000000).
+pub fn mobile_incoming_packet(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i8,
+    direction: u8,
+    hue: u16,
+    flags: u8,
+    notoriety: u8,
+) -> Vec<u8> {
+    // Fixed-length portion: 1 (id) + 2 (len) + 4 (serial) + 2 (body) + 2 (x) + 2 (y)
+    //   + 1 (z) + 1 (dir) + 2 (hue) + 1 (flags) + 1 (notoriety) + 4 (terminator) = 23 bytes
+    let length: u16 = 23;
+    let mut buf: Vec<u8> = Vec::with_capacity(length as usize);
+
+    buf.push(0x78);
+    buf.push((length >> 8) as u8);
+    buf.push((length & 0xFF) as u8);
+    buf.extend_from_slice(&serial.to_be_bytes());
+    buf.extend_from_slice(&body.to_be_bytes());
+    buf.extend_from_slice(&x.to_be_bytes());
+    buf.extend_from_slice(&y.to_be_bytes());
+    buf.push(z as u8);
+    buf.push(direction);
+    buf.extend_from_slice(&hue.to_be_bytes());
+    buf.push(flags);
+    buf.push(notoriety);
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+    buf
+}
+
+/// Builds a Mobile Update packet (0x20).
+///
+/// Sent to update a mobile's body, position, direction, and hue.
+pub fn mobile_update_packet(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i8,
+    direction: u8,
+    hue: u16,
+    flags: u8,
+) -> [u8; 19] {
+    let mut buf = [0u8; 19];
+    buf[0] = 0x20;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    BigEndian::write_u16(&mut buf[5..7], body);
+    buf[7] = 0x00;
+    BigEndian::write_u16(&mut buf[8..10], hue);
+    buf[10] = flags;
+    BigEndian::write_u16(&mut buf[11..13], x);
+    BigEndian::write_u16(&mut buf[13..15], y);
+    buf[15] = 0x00;
+    buf[16] = direction;
+    buf[17] = z as u8;
+    buf[18] = 0x00;
+    buf
+}
+
+/// Parses an incoming speech request packet (0xAD) from raw bytes.
+///
+/// Returns `(type, hue, font, text)` on success, or `None` if the
+/// buffer is too short or malformed.
+pub fn parse_speech_request(data: &[u8]) -> Option<(u8, u16, u16, String)> {
+    if data.len() < 13 {
+        return None;
+    }
+    if data[0] != 0xAD {
+        return None;
+    }
+    let speech_type = data[3];
+    let hue = BigEndian::read_u16(&data[4..6]);
+    let font = BigEndian::read_u16(&data[6..8]);
+    let text_start = 12;
+    if data.len() <= text_start {
+        return None;
+    }
+    let text_bytes = &data[text_start..];
+    let null_pos = text_bytes.iter().position(|&b| b == 0).unwrap_or(text_bytes.len());
+    let text = String::from_utf8_lossy(&text_bytes[..null_pos]).into_owned();
+    Some((speech_type, hue, font, text))
+}
+
+/// Builds an ASCII speech packet (0x1C) directed at a mobile.
+pub fn player_speech_packet(
+    serial: u32,
+    body: u16,
+    speech_type: u8,
+    hue: u16,
+    font: u16,
+    name: &str,
+    text: &str,
+) -> Vec<u8> {
+    let text_len = text.len();
+    let length: u16 = (44 + text_len + 1) as u16;
+    let mut buf: Vec<u8> = Vec::with_capacity(length as usize);
+    buf.push(0x1C);
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(&serial.to_be_bytes());
+    buf.extend_from_slice(&body.to_be_bytes());
+    buf.push(speech_type);
+    buf.extend_from_slice(&hue.to_be_bytes());
+    buf.extend_from_slice(&font.to_be_bytes());
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(29);
+    buf.extend_from_slice(&name_bytes[..name_len]);
+    for _ in name_len..30 {
+        buf.push(0x00);
+    }
+    buf.extend_from_slice(text.as_bytes());
+    buf.push(0x00);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +475,90 @@ mod tests {
     fn parse_character_select_too_short() {
         let data = vec![0u8; 60];
         assert!(parse_character_select(&data).is_none());
+    }
+
+    #[test]
+    fn mobile_incoming_packet_has_correct_structure() {
+        let packet = mobile_incoming_packet(0x0000_0001, 0x0190, 100, 200, 10, 0x00, 0x0000, 0x00, 0x03);
+        assert_eq!(packet[0], 0x78);
+        assert_eq!(packet[1], 0x00); assert_eq!(packet[2], 0x17);
+        assert_eq!(&packet[3..7], &[0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(&packet[7..9], &[0x01, 0x90]);
+        assert_eq!(&packet[9..11], &[0x00, 0x64]);
+        assert_eq!(&packet[11..13], &[0x00, 0xC8]);
+        assert_eq!(packet[13], 0x0A);
+        assert_eq!(packet[14], 0x00);
+        assert_eq!(&packet[15..17], &[0x00, 0x00]);
+        assert_eq!(packet[17], 0x00);
+        assert_eq!(packet[18], 0x03);
+        assert_eq!(&packet[19..23], &[0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(packet.len(), 23);
+    }
+
+    #[test]
+    fn mobile_update_packet_has_correct_structure() {
+        let packet = mobile_update_packet(0x0000_0002, 0x0191, 150, 250, -5, 0x02, 0x0835, 0x00);
+        assert_eq!(packet.len(), 19);
+        assert_eq!(packet[0], 0x20);
+        assert_eq!(&packet[1..5], &[0x00, 0x00, 0x00, 0x02]);
+        assert_eq!(&packet[5..7], &[0x01, 0x91]);
+        assert_eq!(packet[7], 0x00);
+        assert_eq!(&packet[8..10], &[0x08, 0x35]);
+        assert_eq!(packet[10], 0x00);
+        assert_eq!(&packet[11..13], &[0x00, 0x96]);
+        assert_eq!(&packet[13..15], &[0x00, 0xFA]);
+        assert_eq!(packet[15], 0x00);
+        assert_eq!(packet[16], 0x02);
+        assert_eq!(packet[17], 251u8);
+    }
+
+    #[test]
+    fn parse_speech_request_returns_correct_fields() {
+        let text = b"Hello\0";
+        let length: u16 = (12 + text.len()) as u16;
+        let mut data: Vec<u8> = vec![
+            0xAD,
+            (length >> 8) as u8, (length & 0xFF) as u8,
+            0x00,        // type: normal
+            0x00, 0x35,  // hue = 53
+            0x00, 0x03,  // font = 3
+            b'E', b'N', b'U', 0x00,
+        ];
+        data.extend_from_slice(text);
+        let (speech_type, hue, font, msg) = parse_speech_request(&data).unwrap();
+        assert_eq!(speech_type, 0x00);
+        assert_eq!(hue, 53);
+        assert_eq!(font, 3);
+        assert_eq!(msg, "Hello");
+    }
+
+    #[test]
+    fn parse_speech_request_returns_none_for_short_buffer() {
+        let data = vec![0xAD, 0x00, 0x05, 0x00];
+        assert!(parse_speech_request(&data).is_none());
+    }
+
+    #[test]
+    fn parse_speech_request_returns_none_for_wrong_id() {
+        let data = vec![0x1C, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert!(parse_speech_request(&data).is_none());
+    }
+
+    #[test]
+    fn player_speech_packet_has_correct_structure() {
+        let packet = player_speech_packet(0x0000_0001, 0x0190, 0x00, 0x0035, 0x0003, "PlayerName", "Hi there!");
+        assert_eq!(packet[0], 0x1C);
+        let expected_len: u16 = 54;
+        assert_eq!(&packet[1..3], &expected_len.to_be_bytes());
+        assert_eq!(&packet[3..7], &[0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(&packet[7..9], &[0x01, 0x90]);
+        assert_eq!(packet[9], 0x00);
+        assert_eq!(&packet[10..12], &[0x00, 0x35]);
+        assert_eq!(&packet[12..14], &[0x00, 0x03]);
+        let name_field = &packet[14..44];
+        assert_eq!(&name_field[..10], b"PlayerName");
+        assert!(name_field[10..].iter().all(|&b| b == 0));
+        assert_eq!(&packet[44..], b"Hi there!\0");
+        assert_eq!(packet.len(), 54);
     }
 }

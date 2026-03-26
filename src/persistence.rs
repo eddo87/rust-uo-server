@@ -8,14 +8,32 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CharacterSave {
     pub name: String,
-    pub hitpoints: i16,
-    pub max_hitpoints: i16,
+    pub serial: u32,
+    pub body_type: u16,
+    pub hue: u16,
+    // Primary stats
+    pub strength: i16,
+    pub dexterity: i16,
+    pub intelligence: i16,
+    // Derived stats (current + max)
+    pub hit_points: i16,
+    pub max_hit_points: i16,
+    pub stamina: i16,
+    pub max_stamina: i16,
+    pub mana: i16,
+    pub max_mana: i16,
+    // Position
     pub position_x: u16,
     pub position_y: u16,
     pub position_z: i8,
-    pub map: u8,
-    pub stats: (i16, i16, i16), // str, dex, int
+    pub map_id: u8,
+    pub direction: u8,
+    // Resources & reputation
     pub gold: u32,
+    pub karma: i32,
+    pub fame: i32,
+    pub is_alive: bool,
+    // Skills: Debug name → value
     pub skills: HashMap<String, f32>,
 }
 
@@ -56,39 +74,44 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn make_char(name: &str, serial: u32) -> CharacterSave {
+        CharacterSave {
+            name: name.to_string(), serial,
+            body_type: 0x0190, hue: 0,
+            strength: 80, dexterity: 25, intelligence: 45,
+            hit_points: 95, max_hit_points: 100,
+            stamina: 50, max_stamina: 50,
+            mana: 45, max_mana: 45,
+            position_x: 1602, position_y: 1591, position_z: 20,
+            map_id: 0, direction: 0,
+            gold: 15000, karma: 0, fame: 0, is_alive: true,
+            skills: HashMap::new(),
+        }
+    }
+
     fn sample_save_data() -> SaveData {
         let mut skills = HashMap::new();
         skills.insert("Swordsmanship".to_string(), 85.5);
         skills.insert("Magery".to_string(), 72.0);
         skills.insert("Mining".to_string(), 100.0);
 
+        let mut char1 = make_char("Gandalf", 1);
+        char1.skills = skills;
+        let char2 = CharacterSave {
+            name: "Frodo".to_string(), serial: 2,
+            body_type: 0x0190, hue: 0,
+            strength: 30, dexterity: 60, intelligence: 10,
+            hit_points: 40, max_hit_points: 50,
+            stamina: 60, max_stamina: 60,
+            mana: 10, max_mana: 10,
+            position_x: 3000, position_y: 2500, position_z: -5,
+            map_id: 1, direction: 0,
+            gold: 250, karma: 0, fame: 0, is_alive: true,
+            skills: HashMap::new(),
+        };
+
         SaveData {
-            characters: vec![
-                CharacterSave {
-                    name: "Gandalf".to_string(),
-                    hitpoints: 95,
-                    max_hitpoints: 100,
-                    position_x: 1602,
-                    position_y: 1591,
-                    position_z: 20,
-                    map: 0,
-                    stats: (80, 25, 45),
-                    gold: 15000,
-                    skills: skills.clone(),
-                },
-                CharacterSave {
-                    name: "Frodo".to_string(),
-                    hitpoints: 40,
-                    max_hitpoints: 50,
-                    position_x: 3000,
-                    position_y: 2500,
-                    position_z: -5,
-                    map: 1,
-                    stats: (30, 60, 10),
-                    gold: 250,
-                    skills: HashMap::new(),
-                },
-            ],
+            characters: vec![char1, char2],
             world_time: 1700000000000,
             shard_name: "My Shard".to_string(),
         }
@@ -162,15 +185,15 @@ mod tests {
     fn test_negative_position_z() {
         let data = SaveData {
             characters: vec![CharacterSave {
-                name: "Miner".to_string(),
-                hitpoints: 100,
-                max_hitpoints: 100,
-                position_x: 500,
-                position_y: 500,
-                position_z: -128,
-                map: 0,
-                stats: (50, 50, 50),
-                gold: 0,
+                name: "Miner".to_string(), serial: 1,
+                body_type: 0x0190, hue: 0,
+                strength: 50, dexterity: 50, intelligence: 50,
+                hit_points: 100, max_hit_points: 100,
+                stamina: 50, max_stamina: 50,
+                mana: 50, max_mana: 50,
+                position_x: 500, position_y: 500, position_z: -128,
+                map_id: 0, direction: 0,
+                gold: 0, karma: 0, fame: 0, is_alive: true,
                 skills: HashMap::new(),
             }],
             world_time: 42,

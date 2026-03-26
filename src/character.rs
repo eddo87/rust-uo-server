@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Stats & derived stats
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
     pub strength: i16,
     pub dexterity: i16,
@@ -17,14 +18,14 @@ impl Stats {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedStats {
     pub hit_points: StatPair,
     pub stamina: StatPair,
     pub mana: StatPair,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatPair {
     pub current: i16,
     pub max: i16,
@@ -40,7 +41,7 @@ impl StatPair {
 // Skill system
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Skill {
     Alchemy,
     Anatomy,
@@ -169,14 +170,14 @@ impl Skill {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillLock {
     Up,
     Down,
     Locked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SkillEntry {
     /// Current skill value (0.0 - 120.0).
     pub value: f32,
@@ -200,7 +201,7 @@ impl SkillEntry {
 // Character
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Character {
     pub serial: u32,
     pub name: String,
@@ -327,6 +328,76 @@ impl Character {
         }
         entry.value = new_value;
         true
+    }
+
+    /// Serialize this character to a `CharacterSave` for disk persistence.
+    pub fn to_save(&self) -> crate::persistence::CharacterSave {
+        let skills: HashMap<String, f32> = self.skills
+            .iter()
+            .map(|(skill, entry)| (format!("{:?}", skill), entry.value))
+            .collect();
+        crate::persistence::CharacterSave {
+            name: self.name.clone(),
+            serial: self.serial,
+            body_type: self.body_type,
+            hue: self.hue,
+            strength: self.stats.strength,
+            dexterity: self.stats.dexterity,
+            intelligence: self.stats.intelligence,
+            hit_points: self.derived_stats.hit_points.current,
+            max_hit_points: self.derived_stats.hit_points.max,
+            stamina: self.derived_stats.stamina.current,
+            max_stamina: self.derived_stats.stamina.max,
+            mana: self.derived_stats.mana.current,
+            max_mana: self.derived_stats.mana.max,
+            position_x: self.position.0,
+            position_y: self.position.1,
+            position_z: self.position.2,
+            map_id: self.map,
+            direction: self.direction,
+            gold: self.gold,
+            karma: self.karma,
+            fame: self.fame,
+            is_alive: self.is_alive,
+            skills,
+        }
+    }
+
+    /// Reconstruct a `Character` from a `CharacterSave`.
+    pub fn from_save(save: &crate::persistence::CharacterSave) -> Self {
+        let mut character = Character::new_default(save.serial, save.name.clone());
+        character.body_type = save.body_type;
+        character.hue = save.hue;
+        character.stats = Stats {
+            strength: save.strength,
+            dexterity: save.dexterity,
+            intelligence: save.intelligence,
+        };
+        character.derived_stats = DerivedStats {
+            hit_points: StatPair { current: save.hit_points, max: save.max_hit_points },
+            stamina:    StatPair { current: save.stamina,    max: save.max_stamina    },
+            mana:       StatPair { current: save.mana,       max: save.max_mana       },
+        };
+        character.position = (save.position_x, save.position_y, save.position_z);
+        character.map = save.map_id;
+        character.direction = save.direction;
+        character.gold = save.gold;
+        character.karma = save.karma;
+        character.fame = save.fame;
+        character.is_alive = save.is_alive;
+        // Restore skill values from string keys
+        for (name, value) in &save.skills {
+            // Match by Debug representation
+            for &skill in Skill::all() {
+                if format!("{:?}", skill) == *name {
+                    if let Some(entry) = character.skills.get_mut(&skill) {
+                        entry.value = *value;
+                    }
+                    break;
+                }
+            }
+        }
+        character
     }
 }
 

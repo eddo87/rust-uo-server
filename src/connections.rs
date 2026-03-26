@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use async_std::channel::Sender;
 use crate::connection::Connection;
 
 /// Thread-safe manager for all active client connections.
@@ -12,6 +13,8 @@ use crate::connection::Connection;
 pub struct ConnectionManager {
     connections: Arc<Mutex<HashMap<u64, Connection>>>,
     next_id: Arc<Mutex<u64>>,
+    /// Per-connection outbound packet senders.
+    outbound: Arc<Mutex<HashMap<u64, Sender<Vec<u8>>>>>,
 }
 
 impl ConnectionManager {
@@ -20,6 +23,7 @@ impl ConnectionManager {
         ConnectionManager {
             connections: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
+            outbound: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -40,7 +44,55 @@ impl ConnectionManager {
     ///
     /// Returns the removed `Connection` if it existed.
     pub fn remove_connection(&self, id: u64) -> Option<Connection> {
+        self.outbound.lock().unwrap().remove(&id);
         self.connections.lock().unwrap().remove(&id)
+    }
+
+    /// Register the outbound packet sender for a connection.
+    /// Called by tcp.rs immediately after add_connection.
+    pub fn register_sender(&self, conn_id: u64, sender: Sender<Vec<u8>>) {
+        self.outbound.lock().unwrap().insert(conn_id, sender);
+    }
+
+    /// Send a packet to a specific connection. Returns true on success.
+    pub fn send_to(&self, conn_id: u64, packet: Vec<u8>) -> bool {
+        let sender = self.outbound.lock().unwrap().get(&conn_id).cloned();
+        if let Some(tx) = sender {
+            tx.try_send(packet).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Broadcast a packet to all InGame connections within `radius` tiles of
+    /// `pos` (Chebyshev distance), excluding `exclude_id`.
+    pub fn broadcast_to_range(
+        &self,
+        exclude_id: u64,
+        pos: crate::movement::Position,
+        radius: u16,
+        packet: Vec<u8>,
+    ) {
+        let targets: Vec<u64> = {
+            let map = self.connections.lock().unwrap();
+            map.values()
+                .filter(|c| c.id != exclude_id)
+                .filter(|c| c.state == crate::connection::ConnectionState::InGame)
+                .filter(|c| {
+                    if let Some(cpos) = c.position {
+                        let dx = (cpos.x as i32 - pos.x as i32).unsigned_abs() as u16;
+                        let dy = (cpos.y as i32 - pos.y as i32).unsigned_abs() as u16;
+                        dx <= radius && dy <= radius
+                    } else {
+                        false
+                    }
+                })
+                .map(|c| c.id)
+                .collect()
+        };
+        for id in targets {
+            self.send_to(id, packet.clone());
+        }
     }
 
     /// Retrieve a clone of the connection with the given id.
@@ -223,5 +275,71 @@ mod tests {
     fn default_creates_empty_manager() {
         let mgr = ConnectionManager::default();
         assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn send_to_returns_false_for_unknown_id() {
+        let mgr = ConnectionManager::new();
+        assert!(!mgr.send_to(999, vec![0x00]));
+    }
+
+    #[test]
+    fn register_sender_and_send_to() {
+        let mgr = ConnectionManager::new();
+        let id = mgr.add_connection(addr(4000));
+        let (tx, rx) = async_std::channel::bounded::<Vec<u8>>(4);
+        mgr.register_sender(id, tx);
+        assert!(mgr.send_to(id, vec![0x78, 0x00]));
+        let pkt = rx.try_recv().expect("should have received packet");
+        assert_eq!(pkt, vec![0x78, 0x00]);
+    }
+
+    #[test]
+    fn broadcast_to_range_reaches_nearby_skips_far() {
+        use crate::movement::Position;
+
+        let mgr = ConnectionManager::new();
+
+        // Broadcaster at (100, 100)
+        let id_a = mgr.add_connection(addr(5001));
+        mgr.with_connection_mut(id_a, |c| {
+            for s in &[ConnectionState::LoginSeed, ConnectionState::Authenticating,
+                       ConnectionState::ServerSelect, ConnectionState::GameLogin,
+                       ConnectionState::InGame] {
+                let _ = c.transition_to(*s);
+            }
+            c.set_position(Position { x: 100, y: 100, z: 0 });
+        });
+
+        // Player B at (105, 100) — within radius 18
+        let id_b = mgr.add_connection(addr(5002));
+        mgr.with_connection_mut(id_b, |c| {
+            for s in &[ConnectionState::LoginSeed, ConnectionState::Authenticating,
+                       ConnectionState::ServerSelect, ConnectionState::GameLogin,
+                       ConnectionState::InGame] {
+                let _ = c.transition_to(*s);
+            }
+            c.set_position(Position { x: 105, y: 100, z: 0 });
+        });
+        let (tx_b, rx_b) = async_std::channel::bounded::<Vec<u8>>(4);
+        mgr.register_sender(id_b, tx_b);
+
+        // Player C at (500, 500) — out of range
+        let id_c = mgr.add_connection(addr(5003));
+        mgr.with_connection_mut(id_c, |c| {
+            for s in &[ConnectionState::LoginSeed, ConnectionState::Authenticating,
+                       ConnectionState::ServerSelect, ConnectionState::GameLogin,
+                       ConnectionState::InGame] {
+                let _ = c.transition_to(*s);
+            }
+            c.set_position(Position { x: 500, y: 500, z: 0 });
+        });
+        let (tx_c, rx_c) = async_std::channel::bounded::<Vec<u8>>(4);
+        mgr.register_sender(id_c, tx_c);
+
+        mgr.broadcast_to_range(id_a, Position { x: 100, y: 100, z: 0 }, 18, vec![0x77]);
+
+        assert!(rx_b.try_recv().is_ok(), "B should receive broadcast");
+        assert!(rx_c.try_recv().is_err(), "C is out of range");
     }
 }
