@@ -26,6 +26,28 @@ pub mod encryption;
 pub mod packet_validation;
 pub mod skills;
 
+// Phase 2: Game systems
+pub mod account;
+pub mod account_manager;
+pub mod spells;
+pub mod crafting;
+pub mod status_packets;
+pub mod container_packets;
+pub mod targeting;
+pub mod gump;
+pub mod events;
+pub mod commands;
+pub mod map_files;
+pub mod loot;
+pub mod vendor;
+pub mod party;
+pub mod guild;
+pub mod housing;
+pub mod weather;
+pub mod resources;
+pub mod effects;
+pub mod quests;
+
 fn main() {
     env_logger::init();
     info!("Starting rust-uo-server");
