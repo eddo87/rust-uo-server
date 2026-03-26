@@ -99,14 +99,20 @@ fn main() {
     let uo_data_dir = std::env::var("UO_DATA_DIR")
         .unwrap_or_else(|_| "C:/Program Files (x86)/Electronic Arts/Ultima Online Classic".to_string());
     let data_files = data_files::DataFiles::new(&uo_data_dir);
-    match data_files.load_felucca() {
-        Ok(map) => info!(
-            "Felucca map loaded: {} MB of terrain data, {} bytes of statics index",
-            map.map_len() / 1024 / 1024,
-            map.map_len(),
-        ),
-        Err(e) => log::warn!("Could not load Felucca map data (set UO_DATA_DIR to fix): {}", e),
-    }
+    let felucca_map = match data_files.load_felucca() {
+        Ok(map) => {
+            info!(
+                "Felucca map loaded: {} MB of terrain data",
+                map.map_len() / 1024 / 1024,
+            );
+            Some(map)
+        }
+        Err(e) => {
+            log::warn!("Could not load Felucca map data (set UO_DATA_DIR to fix): {}", e);
+            None
+        }
+    };
+    let map_data = std::sync::Arc::new(felucca_map);
 
     let accounts_path = Path::new("saves/accounts.json");
     if let Err(e) = std::fs::create_dir_all("saves") {
@@ -117,7 +123,7 @@ fn main() {
 
     let connections = connections::ConnectionManager::new();
 
-    if let Err(e) = tcp::start(connections) {
+    if let Err(e) = tcp::start(connections, map_data) {
         error!("Error from TCP: {}", e);
     }
 

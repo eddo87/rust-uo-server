@@ -1,17 +1,19 @@
 use std::str;
+use std::sync::Arc;
 use async_std::{net::{TcpListener, TcpStream, ToSocketAddrs}, prelude::*, task};
 use log::{debug, info, trace, warn};
 use crate::error::ServerError;
 use crate::huffman;
 use crate::connections::ConnectionManager;
 use crate::connection::ConnectionState;
+use crate::map_files::MapData;
 use crate::movement::{Direction, MovementRequest, Position};
 
 mod packets;
 
 type Result<T> = std::result::Result<T, ServerError>;
 
-async fn connection_loop(mut stream: TcpStream, connections: ConnectionManager) -> Result<()> {
+async fn connection_loop(mut stream: TcpStream, connections: ConnectionManager, map_data: Arc<Option<MapData>>) -> Result<()> {
     let addr = stream.peer_addr()?;
     let conn_id = connections.add_connection(addr);
     info!("Registered connection {} from: {}", conn_id, addr);
@@ -26,7 +28,7 @@ async fn connection_loop(mut stream: TcpStream, connections: ConnectionManager) 
             connections.remove_connection(conn_id);
             break;
         }
-        if let Err(e) = parse_packets(buffer, &mut stream, conn_id, &connections).await {
+        if let Err(e) = parse_packets(buffer, &mut stream, conn_id, &connections, &map_data).await {
             warn!("Connection {} packet error: {}", conn_id, e);
         }
         buffer = [0; 1024];
@@ -34,7 +36,7 @@ async fn connection_loop(mut stream: TcpStream, connections: ConnectionManager) 
     Ok(())
 }
 
-async fn accept_loop(addr: impl ToSocketAddrs, connections: ConnectionManager) -> Result<()> {
+async fn accept_loop(addr: impl ToSocketAddrs, connections: ConnectionManager, map_data: Arc<Option<MapData>>) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("TCP listener bound, waiting for connections");
     let mut incoming = listener.incoming();
@@ -43,14 +45,15 @@ async fn accept_loop(addr: impl ToSocketAddrs, connections: ConnectionManager) -
         let addr = stream.peer_addr()?;
         info!("Connection received from: {}", addr);
         let conns = connections.clone();
-        task::spawn(connection_loop(stream, conns));
+        let map = map_data.clone();
+        task::spawn(connection_loop(stream, conns, map));
     }
     Ok(())
 }
 
-pub fn start(connections: ConnectionManager) -> Result<()> {
+pub fn start(connections: ConnectionManager, map_data: Arc<Option<MapData>>) -> Result<()> {
     info!("Starting TCP server on 127.0.0.1:2593");
-    task::block_on(accept_loop("127.0.0.1:2593", connections))
+    task::block_on(accept_loop("127.0.0.1:2593", connections, map_data))
 }
 
 fn read_u8(input: &mut &[u8]) -> Result<u8> {
@@ -275,7 +278,7 @@ async fn send_login_init_sequence(stream: &mut TcpStream, serial: u32) -> Result
     Ok(())
 }
 
-async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: u64, connections: &ConnectionManager) -> Result<()> {
+async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: u64, connections: &ConnectionManager, map_data: &Arc<Option<MapData>>) -> Result<()> {
     let mut buffer_slice = &buffer[..];
     debug!("Parsing packet");
     while buffer_slice.len() > 0 {
@@ -283,6 +286,13 @@ async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: 
         match packet_id {
             0xEF => {
                 let (major, minor, revision, patch) = handle_encrypted_login_seed_packet(&mut buffer_slice)?;
+                // Require client version >= 4.0.0.0 (pre-4.0 lacks features we send)
+                if major < 4 {
+                    warn!("Client version {}.{}.{}.{} is too old (minimum 4.0.0.0); sending login deny", major, minor, revision, patch);
+                    stream.write_all(&packets::login_deny_packet(0x06)).await?;
+                    stream.flush().await?;
+                    return Ok(());
+                }
                 connections.with_connection_mut(conn_id, |c| {
                     c.set_client_version(major, minor, revision, patch);
                     let _ = c.transition_to(ConnectionState::LoginSeed);
@@ -342,8 +352,15 @@ async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: 
                     // Compute new position based on direction
                     let new_pos = apply_movement(current_pos, req.direction);
 
-                    // Simple bounds check (Felucca 7168x4096)
-                    if new_pos.x < 7168 && new_pos.y < 4096 {
+                    // Bounds check (Felucca 7168x4096) + passability when map is loaded
+                    let in_bounds = new_pos.x < 7168 && new_pos.y < 4096;
+                    let passable = in_bounds && match map_data.as_ref() {
+                        Some(map) => map.is_passable(new_pos.x as u32, new_pos.y as u32, new_pos.z)
+                            .unwrap_or(true), // allow on map-read error to avoid false rejects
+                        None => true, // no map loaded: skip passability check
+                    };
+
+                    if passable {
                         // Accept the move
                         connections.with_connection_mut(conn_id, |c| {
                             c.set_position(new_pos);
@@ -355,11 +372,11 @@ async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: 
                         stream.flush().await?;
                         debug!("Movement accepted: seq={}, dir={:?}", req.sequence_number, req.direction);
                     } else {
-                        // Reject: out of bounds
+                        // Reject: out of bounds or impassable terrain
                         let reject = packets::movement_reject_packet(req.sequence_number, current_pos, req.direction);
                         stream.write_all(&reject).await?;
                         stream.flush().await?;
-                        debug!("Movement rejected: out of bounds");
+                        debug!("Movement rejected: pos=({},{}) in_bounds={}", new_pos.x, new_pos.y, in_bounds);
                     }
                 }
             }

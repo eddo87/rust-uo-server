@@ -2,7 +2,7 @@
 
 A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server implementation written in Rust. UO is a fantasy MMORPG originally released in 1997 that still has an active community running free shards on open-source server implementations (most notably [ServUO](https://github.com/ServUO/ServUO) in C#). This project aims to provide a Rust alternative with strong type safety, memory safety, and the performance characteristics Rust is known for.
 
-> **Status:** Active development. 57 source files, ~22,700 lines of Rust, 840 tests passing.
+> **Status:** Active development. 57 source files, ~22,800 lines of Rust, 841 tests passing.
 
 ## Architecture
 
@@ -183,11 +183,11 @@ The original author has been documenting progress on a [public journal](https://
 - [x] World persistence (`WorldState` JSON save/load with dirty-flag auto-save every 5 minutes)
 - [x] Character slot persistence (`CharSlots` — 7 slots per account, JSON-backed)
 - [x] A\* pathfinding over live map data with passability checks
+- [x] Movement validation using map passability (impassable tiles rejected in TCP handler)
+- [x] Client version validation (0x82 login deny for clients older than 4.0.0.0)
 
 ### Next Steps
 
-- [ ] Wire pathfinding into movement validation (reject illegal moves in TCP handler)
-- [ ] Client version validation and feature gating (0x82 login deny for unsupported versions)
 - [ ] Database-backed account and world storage
 
 ## License

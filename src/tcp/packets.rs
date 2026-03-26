@@ -218,6 +218,13 @@ pub fn war_mode_packet(war: bool) -> [u8; 5] {
 /// - [64..68] character slot (uint32 BE)
 /// - [68..72] client IP
 ///
+/// 0x82 Login Deny — sent when login is refused.
+///
+/// `reason` values: 0x00 = invalid credentials, 0x01 = account in use,
+/// 0x02 = account blocked, 0x03 = bad password, 0x04 = idle too long,
+/// 0x05 = communication problem, 0x06 = bad communication (client too old).
+pub fn login_deny_packet(reason: u8) -> [u8; 2] { [0x82, reason] }
+
 /// Returns `(slot, character_name)` or `None` if the data is too short.
 pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
     if data.len() < 68 { return None; }
@@ -320,6 +327,12 @@ mod tests {
         let war = war_mode_packet(true);
         assert_eq!(war[0], 0x72);
         assert_eq!(war[1], 0x01);
+    }
+
+    #[test]
+    fn login_deny_packet_structure() {
+        let pkt = login_deny_packet(0x06);
+        assert_eq!(pkt, [0x82, 0x06]);
     }
 
     #[test]
