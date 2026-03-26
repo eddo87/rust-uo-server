@@ -5,7 +5,7 @@ use crate::error::ServerError;
 use crate::huffman;
 use crate::connections::ConnectionManager;
 use crate::connection::ConnectionState;
-use crate::movement::{Direction, Position};
+use crate::movement::{Direction, MovementRequest, Position};
 
 mod packets;
 
@@ -134,6 +134,34 @@ fn handle_character_select_packet(buffer_slice: &mut &[u8]) -> Result<(u32, Stri
     }
 }
 
+fn handle_movement_request(buffer_slice: &mut &[u8]) -> Result<Option<MovementRequest>> {
+    let packet_length = 6;
+    if buffer_slice.len() < packet_length {
+        return Err(ServerError::PacketParse("not enough bytes for movement request".into()));
+    }
+    let (data, rest) = buffer_slice.split_at(packet_length);
+    *buffer_slice = rest;
+    let data_arr: &[u8; 6] = data.try_into()
+        .map_err(|_| ServerError::PacketParse("movement request data not 6 bytes".into()))?;
+    Ok(packets::parse_movement_request(data_arr))
+}
+
+fn apply_movement(pos: Position, dir: Direction) -> Position {
+    let (dx, dy): (i32, i32) = match dir {
+        Direction::North     => ( 0, -1),
+        Direction::Northeast => ( 1, -1),
+        Direction::East      => ( 1,  0),
+        Direction::Southeast => ( 1,  1),
+        Direction::South     => ( 0,  1),
+        Direction::Southwest => (-1,  1),
+        Direction::West      => (-1,  0),
+        Direction::Northwest => (-1, -1),
+    };
+    let new_x = (pos.x as i32 + dx).max(0) as u16;
+    let new_y = (pos.y as i32 + dy).max(0) as u16;
+    Position { x: new_x, y: new_y, z: pos.z }
+}
+
 async fn send_server_list_packet(stream: &mut TcpStream) -> Result<()> {
     let buffer = packets::server_list_packet();
     stream.write_all(&buffer).await?; stream.flush().await?;
@@ -174,6 +202,31 @@ fn compress_packet(src: &[u8]) -> Vec<u8> {
     output
 }
 
+async fn send_status_bar_packet(stream: &mut TcpStream, serial: u32) -> Result<()> {
+    use crate::status_packets::{StatBarData, StatusTypeFlag, build_status_bar_packet};
+
+    let data = StatBarData {
+        serial,
+        name: "Player".to_string(),
+        hit_points: 100,
+        max_hit_points: 100,
+        stamina: 100,
+        max_stamina: 100,
+        mana: 100,
+        max_mana: 100,
+        str_stat: 100,
+        dex_stat: 100,
+        int_stat: 100,
+        ..StatBarData::default()
+    };
+
+    let packet = build_status_bar_packet(&data, StatusTypeFlag::Basic);
+    stream.write_all(&compress_packet(&packet)).await?;
+    stream.flush().await?;
+    debug!("Sent Status Bar (0x11)");
+    Ok(())
+}
+
 async fn send_login_init_sequence(stream: &mut TcpStream, serial: u32) -> Result<()> {
     // Starting position: Britain (Felucca)
     let x: u16 = 1496;
@@ -187,6 +240,9 @@ async fn send_login_init_sequence(stream: &mut TcpStream, serial: u32) -> Result
     stream.write_all(&compress_packet(&packets::login_confirm_packet(serial, body, x, y, z, 0x00, map_width, map_height))).await?;
     stream.flush().await?;
     debug!("Sent Login Confirm (0x1B)");
+
+    // 0x11 Status Bar
+    send_status_bar_packet(stream, serial).await?;
 
     // 0x20 Draw Player
     let position = Position { x, y, z };
@@ -270,10 +326,42 @@ async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: 
                 let serial = 0x00000001u32 + slot;
                 connections.with_connection_mut(conn_id, |c| {
                     c.set_character_name(char_name.clone());
+                    c.set_position(Position { x: 1496, y: 1628, z: 10 });
                     let _ = c.transition_to(ConnectionState::InGame);
                 });
                 info!("Player entering game: {} (serial 0x{:08X})", char_name, serial);
                 send_login_init_sequence(&mut stream, serial).await?;
+            }
+            0x02 => {
+                if let Some(req) = handle_movement_request(&mut buffer_slice)? {
+                    // Get current position from connection
+                    let current_pos = connections.with_connection_mut(conn_id, |c| c.position)
+                        .flatten()
+                        .unwrap_or(Position { x: 1496, y: 1628, z: 10 }); // Britain default
+
+                    // Compute new position based on direction
+                    let new_pos = apply_movement(current_pos, req.direction);
+
+                    // Simple bounds check (Felucca 7168x4096)
+                    if new_pos.x < 7168 && new_pos.y < 4096 {
+                        // Accept the move
+                        connections.with_connection_mut(conn_id, |c| {
+                            c.set_position(new_pos);
+                            c.update_move_sequence(req.sequence_number);
+                        });
+                        let notoriety = 0x01u8; // good (blue)
+                        let ack = packets::movement_ack_packet(req.sequence_number, notoriety);
+                        stream.write_all(&ack).await?;
+                        stream.flush().await?;
+                        debug!("Movement accepted: seq={}, dir={:?}", req.sequence_number, req.direction);
+                    } else {
+                        // Reject: out of bounds
+                        let reject = packets::movement_reject_packet(req.sequence_number, current_pos, req.direction);
+                        stream.write_all(&reject).await?;
+                        stream.flush().await?;
+                        debug!("Movement rejected: out of bounds");
+                    }
+                }
             }
             0x73 => continue,
             _ => { if packet_id != 0x00 { warn!("Unknown packet ID: 0x{:02X}", packet_id); } continue; }
@@ -281,4 +369,52 @@ async fn parse_packets(buffer: [u8; 1024], mut stream: &mut TcpStream, conn_id: 
     }
     debug!("Finished parsing packet");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    /// Verify that the 0x11 status bar packet bytes are built correctly
+    /// using the status_packets module (no async I/O needed for this check).
+    #[test]
+    fn status_bar_packet_builds_correctly() {
+        use crate::status_packets::{StatBarData, StatusTypeFlag, build_status_bar_packet};
+
+        let data = StatBarData {
+            serial: 0x0000_0001,
+            name: "Player".to_string(),
+            hit_points: 100,
+            max_hit_points: 100,
+            stamina: 100,
+            max_stamina: 100,
+            mana: 100,
+            max_mana: 100,
+            str_stat: 100,
+            dex_stat: 100,
+            int_stat: 100,
+            ..StatBarData::default()
+        };
+
+        let pkt = build_status_bar_packet(&data, StatusTypeFlag::Basic);
+
+        // Packet ID must be 0x11
+        assert_eq!(pkt[0], 0x11);
+
+        // Length field (bytes 1..3) must match actual packet length
+        let encoded_len = ((pkt[1] as u16) << 8) | (pkt[2] as u16);
+        assert_eq!(encoded_len as usize, pkt.len());
+
+        // Serial at bytes 3..7
+        assert_eq!(&pkt[3..7], &[0x00, 0x00, 0x00, 0x01]);
+
+        // Name "Player" at bytes 7..37 (30-byte null-padded field)
+        assert_eq!(&pkt[7..13], b"Player");
+        assert!(pkt[13..37].iter().all(|&b| b == 0));
+
+        // type_flag byte (Basic = 0) is at offset 42
+        assert_eq!(pkt[42], 0x00);
+    }
 }

@@ -1,4 +1,5 @@
 use log::{error, info};
+use std::path::Path;
 use std::time::Duration;
 
 pub mod error;
@@ -49,6 +50,9 @@ pub mod weather;
 pub mod resources;
 pub mod effects;
 pub mod quests;
+pub mod pathfinding;
+pub mod char_slots;
+pub mod world_state;
 
 fn main() {
     env_logger::init();
@@ -64,6 +68,29 @@ fn main() {
     .expect("Failed to set Ctrl+C handler");
 
     let timer_register_tx = timer::start();
+
+    // World state: load or create, then register 5-minute auto-save.
+    let world_state = world_state::WorldState::load_or_create(
+        std::path::Path::new("saves/world.json"), "My Shard");
+    info!("World state loaded: {} characters", world_state.character_count());
+    {
+        let ws = world_state.clone();
+        let interval: i64 = 300_000;
+        let next = ticks::current_ticks() + interval;
+        let save_timer = timer::Timer {
+            repetitions: -1,
+            interval,
+            next,
+            callback: Box::new(move || {
+                if let Err(e) = ws.save() {
+                    log::warn!("Auto-save failed: {}", e);
+                }
+            }),
+        };
+        if let Err(e) = timer_register_tx.send(save_timer) {
+            log::warn!("Failed to register auto-save timer: {}", e);
+        }
+    }
 
     if let Err(e) = test_timers::start(timer_register_tx) {
         error!("Error starting test timers: {}", e);
@@ -81,6 +108,13 @@ fn main() {
         Err(e) => log::warn!("Could not load Felucca map data (set UO_DATA_DIR to fix): {}", e),
     }
 
+    let accounts_path = Path::new("saves/accounts.json");
+    if let Err(e) = std::fs::create_dir_all("saves") {
+        log::warn!("Could not create saves/ directory: {}", e);
+    }
+    let mut account_manager = account_manager::AccountManager::load_or_new(accounts_path);
+    info!("Account manager loaded: {} accounts", account_manager.count());
+
     let connections = connections::ConnectionManager::new();
 
     if let Err(e) = tcp::start(connections) {
@@ -92,5 +126,15 @@ fn main() {
 
     info!("Shutting down: allowing in-flight connections to finish...");
     std::thread::sleep(Duration::from_secs(2));
+
+    if let Err(e) = std::fs::create_dir_all("saves") {
+        log::warn!("Could not create saves/ directory: {}", e);
+    }
+    if let Err(e) = account_manager.save_to_file(accounts_path) {
+        log::warn!("Failed to save accounts: {}", e);
+    } else {
+        info!("Accounts saved.");
+    }
+
     info!("Server shut down gracefully.");
 }

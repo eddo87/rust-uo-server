@@ -2,7 +2,7 @@
 
 A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server implementation written in Rust. UO is a fantasy MMORPG originally released in 1997 that still has an active community running free shards on open-source server implementations (most notably [ServUO](https://github.com/ServUO/ServUO) in C#). This project aims to provide a Rust alternative with strong type safety, memory safety, and the performance characteristics Rust is known for.
 
-> **Status:** Active development. 57 source files, ~22,500 lines of Rust, 811 tests passing.
+> **Status:** Active development. 57 source files, ~22,700 lines of Rust, 840 tests passing.
 
 ## Architecture
 
@@ -79,6 +79,9 @@ A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server
 | `commands` | GM command registry with 12 pre-built commands, access gating |
 | `events` | Thread-safe pub/sub event bus with 18 game event types |
 | `persistence` | JSON save/load for game state |
+| `world_state` | Thread-safe world state container with dirty-flag auto-save |
+| `char_slots` | Per-account character slot management (up to 7 slots), JSON persistence |
+| `pathfinding` | A\* pathfinding over `MapData` with passability checks and 48-tile range limit |
 
 ## Getting Started
 
@@ -177,12 +180,14 @@ The original author has been documenting progress on a [public journal](https://
 - [x] Event bus for game mechanics
 - [x] Wire game systems into the TCP packet loop (handle in-game packets end-to-end)
 - [x] Load UO map/art data files on startup (`.mul` + `.uop` LegacyMUL format)
+- [x] World persistence (`WorldState` JSON save/load with dirty-flag auto-save every 5 minutes)
+- [x] Character slot persistence (`CharSlots` — 7 slots per account, JSON-backed)
+- [x] A\* pathfinding over live map data with passability checks
 
 ### Next Steps
 
-- [ ] Implement world persistence (save/load game state to disk)
-- [ ] Add pathfinding / movement validation using map data
-- [ ] Client version validation and feature gating
+- [ ] Wire pathfinding into movement validation (reject illegal moves in TCP handler)
+- [ ] Client version validation and feature gating (0x82 login deny for unsupported versions)
 - [ ] Database-backed account and world storage
 
 ## License

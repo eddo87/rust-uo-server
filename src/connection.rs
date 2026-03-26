@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::movement::Position;
 use crate::ticks;
 
 /// Represents the stages a client connection moves through during the login flow.
@@ -83,6 +84,12 @@ pub struct Connection {
     pub character_name: Option<String>,
     pub client_version: Option<(u8, u8, u8, u8)>,
     pub connected_at: i64,
+    /// Current map position; `None` until the player enters the game world.
+    pub position: Option<Position>,
+    /// Current map id (0 = Felucca).
+    pub map_id: u8,
+    /// Last acknowledged movement sequence number.
+    pub move_sequence: u8,
 }
 
 impl Connection {
@@ -96,6 +103,9 @@ impl Connection {
             character_name: None,
             client_version: None,
             connected_at: ticks::current_ticks(),
+            position: None,
+            map_id: 0,
+            move_sequence: 0,
         }
     }
 
@@ -138,6 +148,16 @@ impl Connection {
     /// Set the character name once the player selects or creates a character.
     pub fn set_character_name(&mut self, name: String) {
         self.character_name = Some(name);
+    }
+
+    /// Set (or update) the player's current map position.
+    pub fn set_position(&mut self, pos: Position) {
+        self.position = Some(pos);
+    }
+
+    /// Record the last acknowledged movement sequence number.
+    pub fn update_move_sequence(&mut self, seq: u8) {
+        self.move_sequence = seq;
     }
 }
 
@@ -366,5 +386,32 @@ mod tests {
         let after = ticks::current_ticks();
         assert!(conn.connected_at >= before);
         assert!(conn.connected_at <= after);
+    }
+
+    #[test]
+    fn position_starts_none() {
+        let conn = Connection::new(1, test_addr());
+        assert!(conn.position.is_none());
+        assert_eq!(conn.map_id, 0);
+        assert_eq!(conn.move_sequence, 0);
+    }
+
+    #[test]
+    fn set_position_works() {
+        use crate::movement::Position;
+        let mut conn = Connection::new(1, test_addr());
+        let pos = Position { x: 1496, y: 1628, z: 10 };
+        conn.set_position(pos);
+        assert_eq!(conn.position, Some(pos));
+    }
+
+    #[test]
+    fn move_sequence_updates() {
+        let mut conn = Connection::new(1, test_addr());
+        assert_eq!(conn.move_sequence, 0);
+        conn.update_move_sequence(42);
+        assert_eq!(conn.move_sequence, 42);
+        conn.update_move_sequence(255);
+        assert_eq!(conn.move_sequence, 255);
     }
 }

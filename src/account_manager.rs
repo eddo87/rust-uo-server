@@ -3,7 +3,15 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::account::{Account, AccessLevel};
+
+/// On-disk serialisation envelope.
+#[derive(Serialize, Deserialize)]
+struct AccountManagerData {
+    accounts: HashMap<String, Account>,
+}
 
 /// Manages all player accounts on the server.
 pub struct AccountManager {
@@ -82,19 +90,75 @@ impl AccountManager {
         self.accounts.remove(&username.to_lowercase()).is_some()
     }
 
-    /// Persist all accounts to a JSON file.
+    /// Save all accounts to a JSON file at `path`.
+    ///
+    /// The file format is `{ "accounts": { "username": { ...account fields... } } }`.
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.accounts)
+        let data = AccountManagerData {
+            accounts: self.accounts.clone(),
+        };
+        let json = serde_json::to_string_pretty(&data)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         fs::write(path, json)
     }
 
     /// Load accounts from a JSON file, replacing any currently held data.
     pub fn load_from_file(&mut self, path: &Path) -> io::Result<()> {
-        let data = fs::read_to_string(path)?;
-        self.accounts = serde_json::from_str(&data)
+        let raw = fs::read_to_string(path)?;
+        let data: AccountManagerData = serde_json::from_str(&raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.accounts = data.accounts;
         Ok(())
+    }
+
+    /// Load accounts from a JSON file, or return an empty `AccountManager` if the file
+    /// doesn't exist or is corrupt.
+    pub fn load_or_new(path: &Path) -> Self {
+        if !path.exists() {
+            log::info!(
+                "No accounts file found at '{}' — starting with empty account manager.",
+                path.display()
+            );
+            return AccountManager::new();
+        }
+
+        let raw = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "Failed to read accounts file '{}': {} — starting with empty account manager.",
+                    path.display(),
+                    e
+                );
+                return AccountManager::new();
+            }
+        };
+
+        match serde_json::from_str::<AccountManagerData>(&raw) {
+            Ok(data) => {
+                log::info!(
+                    "Loaded {} account(s) from '{}'.",
+                    data.accounts.len(),
+                    path.display()
+                );
+                AccountManager {
+                    accounts: data.accounts,
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Accounts file '{}' is corrupt ({}): starting with empty account manager.",
+                    path.display(),
+                    e
+                );
+                AccountManager::new()
+            }
+        }
+    }
+
+    /// Number of registered accounts.
+    pub fn count(&self) -> usize {
+        self.accounts.len()
     }
 
     /// Number of registered accounts.
@@ -195,7 +259,7 @@ mod tests {
             .unwrap()
             .access_level = AccessLevel::GameMaster;
 
-        let path = PathBuf::from("test_accounts.json");
+        let path = PathBuf::from("test_accounts_legacy.json");
         mgr.save_to_file(&path).unwrap();
 
         let mut mgr2 = AccountManager::new();
@@ -209,5 +273,61 @@ mod tests {
 
         // Clean up
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let mut mgr = AccountManager::new();
+        mgr.create_account("Carol", "pw1").unwrap();
+        mgr.create_account("Dave", "pw2").unwrap();
+        mgr.get_account_mut("Dave")
+            .unwrap()
+            .access_level = AccessLevel::Administrator;
+
+        let path = PathBuf::from("test_roundtrip_accounts.json");
+        mgr.save_to_file(&path).unwrap();
+
+        let mgr2 = AccountManager::load_or_new(&path);
+        assert_eq!(mgr2.count(), 2);
+        assert!(mgr2.get_account("carol").is_some());
+        assert_eq!(
+            mgr2.get_account("dave").unwrap().access_level,
+            AccessLevel::Administrator
+        );
+        assert!(mgr2.get_account("carol").unwrap().verify_password("pw1"));
+
+        // Clean up
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_or_new_missing_file() {
+        let path = PathBuf::from("this_file_definitely_does_not_exist_12345.json");
+        // Ensure the file really is absent
+        let _ = fs::remove_file(&path);
+        let mgr = AccountManager::load_or_new(&path);
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn load_or_new_corrupt_file() {
+        let path = PathBuf::from("test_corrupt_accounts.json");
+        fs::write(&path, b"not valid json at all {{{").unwrap();
+        let mgr = AccountManager::load_or_new(&path);
+        assert_eq!(mgr.count(), 0);
+        // Clean up
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn count_returns_number_of_accounts() {
+        let mut mgr = AccountManager::new();
+        assert_eq!(mgr.count(), 0);
+        mgr.create_account("Eve", "pass").unwrap();
+        assert_eq!(mgr.count(), 1);
+        mgr.create_account("Frank", "pass").unwrap();
+        assert_eq!(mgr.count(), 2);
+        mgr.delete_account("Eve");
+        assert_eq!(mgr.count(), 1);
     }
 }
