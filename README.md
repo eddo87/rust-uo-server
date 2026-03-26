@@ -1,29 +1,188 @@
 # Rust UO Server
 
-This is an implementation of an Ultima Online server I've been building whilst learning Rust. I'm using it as a playground for things I've learnt and want to put into practice, and also to work out how to tackle some hard problems in Rust.
+A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server implementation written in Rust. UO is a fantasy MMORPG originally released in 1997 that still has an active community running free shards on open-source server implementations (most notably [ServUO](https://github.com/ServUO/ServUO) in C#). This project aims to provide a Rust alternative with strong type safety, memory safety, and the performance characteristics Rust is known for.
 
-[Ultima Online (UO)](https://en.wikipedia.org/wiki/Ultima_Online) is a fantasy massively multiplayer online role-playing game (MMORPG) originally released in 1997. There are still official servers run by [Broadsword](https://broadsword.com/about.html), running a closed-source implementation. There are also a large amount of free to play servers that run on open-source, community built server implementations such as this one which emulate the behaviour of the official servers. The most popular implementations are written in C#. As far as I'm aware there aren't any existing Rust implementations. I'm hoping that my implementation will provide at least some interesting benchmarks, if not a server implementation that is adopted by the community and prolongs the life of a game that I love.
+> **Status:** Active development. 53 source files, ~20,800 lines of Rust, 799 tests passing.
 
-I have been documenting my progress on my [public journal](https://thisdotrob.github.io/) - see all posts [tagged "UO server project"](https://thisdotrob.github.io/tag/UO%20server%20project/). They cover my thoughts on how I've architected the server, the design decisions and some code walkthroughs.
+## Architecture
 
-## Progress & next tasks
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Main Thread                             │
+│  env_logger::init() → timer::start() → tcp::start()            │
+│  Ctrl+C → ShutdownSignal → graceful shutdown                   │
+└──────────────┬──────────────────────┬───────────────────────────┘
+               │                      │
+    ┌──────────▼──────────┐  ┌────────▼─────────────────┐
+    │   Timer System      │  │   Async TCP Server       │
+    │   3 threads:        │  │   async-std on :2593     │
+    │   register/         │  │   Connection per client  │
+    │   prioritise/       │  │   Packet parse → respond │
+    │   execute           │  └──────────────────────────┘
+    └─────────────────────┘
+```
 
-The following list obviously isn't a complete list of tasks, just those I've completed so far and the ones I think would be most interesting and useful to tackle next:
+### Core Infrastructure
 
-- [x] Basic timer logic ([1df6c58](https://github.com/thisdotrob/rust-uo-server/commit/1df6c58e504fb63577774237225872644ce8acc1))
-- [x] Add CLI to trigger test timers ([dd9ab54](https://github.com/thisdotrob/rust-uo-server/commit/dd9ab54a64a5ecc19526d91d8f145b92450b4384))
-- [x] Refactor timer logic ([3dc6e81](https://github.com/thisdotrob/rust-uo-server/commit/3dc6e8166ef937fcbf28f850121ad4c5806aa2e8), [a21b024](https://github.com/thisdotrob/rust-uo-server/commit/a21b024cccd5ab1026d730ddc87665e9779e1ddc), [ee83e96](https://github.com/thisdotrob/rust-uo-server/commit/ee83e96e1de2886a628a1e5aaa120f35d6263162), [66cd327](https://github.com/thisdotrob/rust-uo-server/commit/66cd3273062ced3afbfc94fbfef6075a1fddee38))
-- [x] Explore approaches to adding callbacks to timers and making them multi-threaded ([fe86c53](https://github.com/thisdotrob/rust-uo-server/commit/fe86c531f12b7068aa7fa5783c50bba2685621f6), [161cd3c](https://github.com/thisdotrob/rust-uo-server/commit/161cd3c39edfef13a550c0031637d1b2068b4ae8), [25774cd](https://github.com/thisdotrob/rust-uo-server/commit/25774cd117a58d67ab5113b994598f2f67c8ee8c), [5553241](https://github.com/thisdotrob/rust-uo-server/commit/55532411640dce317cdbc89d56f0210879d50ca6))
-- [x] Basic TCP connection handling ([a1744e4](https://github.com/thisdotrob/rust-uo-server/commit/a1744e4c280fa49f0ea6416487492108fd5bdc54), [95fdea7](https://github.com/thisdotrob/rust-uo-server/commit/95fdea728d4bf394689daccdd51af3bc1c92ed19), [44f855b](https://github.com/thisdotrob/rust-uo-server/commit/44f855bef63687c65412e0bd3b2e4ecd57e119dd), [7bbb24a](https://github.com/thisdotrob/rust-uo-server/commit/7bbb24a83095097ccd77e6decf068c8a08712b4b))
-- [x] Receive, parse and respond to login and shard selection packets from game client ([a1744e4](https://github.com/thisdotrob/rust-uo-server/commit/a1744e4c280fa49f0ea6416487492108fd5bdc54), [9964692](https://github.com/thisdotrob/rust-uo-server/commit/996469216dea568bb687c2b4820b78618dd197ae), [d484f7c](https://github.com/thisdotrob/rust-uo-server/commit/d484f7cee2f852bb54580b0dc35ffc8607146287), [8f98387](https://github.com/thisdotrob/rust-uo-server/commit/8f983877331eaa87b61871ba36a8c92601c1e979))
-- [x] Non-blocking connection handling to allow multiple clients ([98c3641](https://github.com/thisdotrob/rust-uo-server/commit/98c3641177aa20a9802b4dd63c103b8aa88e4336), [1af0e99](https://github.com/thisdotrob/rust-uo-server/commit/1af0e99931279eee34f5f785ec8a07f79ea883ac), [03042d8](https://github.com/thisdotrob/rust-uo-server/commit/03042d8f53cf05f9f65de433189a95c946ac05ef), [26970df](https://github.com/thisdotrob/rust-uo-server/commit/26970dfb04d6a48961532d4634cf508b3e023414))
-- [x] Packet compression for "in-game" packets ([0b1e8f6](https://github.com/thisdotrob/rust-uo-server/commit/0b1e8f62eeb8d1a59d7cfc46e43bdcf4fec7de07))
-- [x] Refactor compression interface and module structure ([08265ac](https://github.com/thisdotrob/rust-uo-server/commit/08265ac2812b2f9b6adeed20cb05df11ea761f08), [10a5f61](https://github.com/thisdotrob/rust-uo-server/commit/10a5f6117d73efb2917f55db34db91ac61138571))
-- [ ] Refactor TCP module - extract sub modules and write tests ([acac0ed](https://github.com/thisdotrob/rust-uo-server/commit/acac0ed75cc2b89b9ca02f8eda6d9f2edd68901f))
-- [ ] Finalise design of timer logic then add tests and documentation
-- [ ] Store connection state and associate it with timers
-- [ ] Receive, parse and respond to initial "in-game" packets
-- [ ] Load game world state on server startup
-- [ ] Save game world state to DB at intervals
+| Module | Description |
+|--------|-------------|
+| `tcp` | Async TCP server with packet parsing, error handling, structured logging |
+| `timer` | Multi-threaded timer system (registration, prioritisation, execution) |
+| `huffman` | Huffman compression and decompression for in-game packets |
+| `error` | Unified `ServerError` enum with `thiserror` (replaces all `unwrap()`) |
+| `config` | TOML-based server configuration with sensible defaults |
+| `shutdown` | Graceful Ctrl+C shutdown with `ShutdownSignal` (Arc\<AtomicBool\>) |
+| `connection` | Client connection state machine (7 states: Connecting → InGame) |
+| `connections` | Thread-safe connection manager (Arc\<Mutex\<HashMap\>\>) |
+| `encryption` | UO login encryption (XOR key rotation) + Twofish stub |
+| `packet_validation` | Rate limiting, string sanitisation, coordinate bounds checking |
+| `packets` | Packet registry with metadata for 17 known UO packet types |
 
+### UO Protocol Packets
 
+| Module | Packets |
+|--------|---------|
+| `tcp/packets` | Login flow: 0xEF, 0x80, 0xA0, 0x91 + server list, redirect, features, character list |
+| `movement` | 0x02 request, 0x20 draw player, 0x21 reject, 0x22 acknowledge |
+| `speech` | 0x1C ASCII, 0xAD unicode parse, 0xAE unicode send, system messages |
+| `status_packets` | 0x11 status bar (type flags 0-4 incl. AOS), 0x3A skill updates |
+| `container_packets` | 0x24 open, 0x3C contents, 0x25 add, 0x2E equip, 0x1D remove, 0x07/0x08 pick up/drop |
+| `targeting` | 0x6C target cursor (build + parse) with TargetManager |
+| `gump` | 0xB0 display (GumpBuilder fluent API), 0xB1 response parse, UTF-16 |
+| `effects` | 0x70 graphical, 0x54 sound, 0xC0 extended + spell effect presets |
+| `weather` | 0x65 weather, 0x4F light level with dawn/dusk transitions |
+| `party` | 0xBF/0x06 party sub-commands (add, remove, message, loot sharing) |
+
+### Game Systems
+
+| Module | Description |
+|--------|-------------|
+| `character` | Full character model: stats, 58 UO skills, heal/damage/gain mechanics |
+| `skills` | Skill gain formulas, caps (700 total, 120 individual), warrior/mage/crafter templates |
+| `mobile` | NPC/monster base: AI types, notoriety, spawners with stat ranges |
+| `combat` | UO combat formulas: hit chance, damage, armor reduction, swing delay |
+| `item` / `inventory` | Equipment layers, item flags, serial generation, recursive weight |
+| `world` | 6 UO maps, tile flags (32 bitflags), regions, spawn points |
+| `map_files` | Parser for UO `.mul` files (map terrain, statics, index) |
+| `spells` | All 64 magery spells across 8 circles with reagents and requirements |
+| `crafting` | 10 craft skills, 23 resources, recipes with success/exceptional chance |
+| `loot` | Drop tables with rarity tiers, gold ranges (5 pre-built tables) |
+| `vendor` | 19 vendor types, buy/sell/restock, 4 pre-built shop templates |
+| `housing` | 15 house types, security levels, 7-stage decay, lockdowns/secures |
+| `resources` | Mining (9 ore tiers), lumberjacking (7 wood), fishing (5 types) |
+| `quests` | Quest lifecycle, objectives, prerequisites, chains, time limits |
+| `guild` | Guild types, ranks (promote/demote), wars, alliances |
+| `party` | Invite/accept/decline, loot sharing, max 10 members |
+| `account` | Access levels (Player → Owner), character slots, banning |
+| `commands` | GM command registry with 12 pre-built commands, access gating |
+| `events` | Thread-safe pub/sub event bus with 18 game event types |
+| `persistence` | JSON save/load for game state |
+
+## Getting Started
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (edition 2021)
+
+### Build & Run
+
+```bash
+cargo build --release
+RUST_LOG=info cargo run --release
+```
+
+### Configuration
+
+Copy and edit `server.toml` (all settings are optional, defaults are used for missing values):
+
+```toml
+[network]
+bind_address = "127.0.0.1"
+port = 2593
+
+[shard]
+name = "My Shard"
+
+[game]
+starting_city = "Britain"
+```
+
+### Run Tests
+
+```bash
+cargo test
+```
+
+799 tests covering packet construction/parsing, game mechanics, data structures, and edge cases.
+
+## Log Levels
+
+Control verbosity with the `RUST_LOG` environment variable:
+
+| Level | What you see |
+|-------|-------------|
+| `error` | Fatal/serious errors only |
+| `warn` | Unknown packet IDs, recoverable issues |
+| `info` | Server startup, connections, logins |
+| `debug` | Packet flow, timer operations, state changes |
+| `trace` | Raw hex dumps, passwords, tick-level timer ops |
+
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `async-std` | Async TCP server runtime |
+| `chrono` | Timestamp handling for ticks |
+| `byteorder` | Big-endian packet serialization |
+| `thiserror` | Ergonomic error types |
+| `log` + `env_logger` | Structured logging |
+| `serde` + `serde_json` + `toml` | Config and persistence serialization |
+| `bitflags` | Tile flags, item flags |
+| `ctrlc` | Cross-platform Ctrl+C handling |
+| `rand` | Combat rolls, loot drops, skill gains |
+
+## Development Journal
+
+The original author has been documenting progress on a [public journal](https://thisdotrob.github.io/) — see posts [tagged "UO server project"](https://thisdotrob.github.io/tag/UO%20server%20project/).
+
+## Progress
+
+### Completed
+
+- [x] Multi-threaded timer system with callbacks
+- [x] Async TCP server with non-blocking client handling
+- [x] Login/shard selection packet flow
+- [x] Huffman compression and decompression
+- [x] Proper error handling (zero `unwrap()` in production code)
+- [x] Structured logging with configurable levels
+- [x] Graceful shutdown with Ctrl+C
+- [x] TOML-based server configuration
+- [x] Connection state machine
+- [x] UO login encryption
+- [x] Packet validation and rate limiting
+- [x] Movement, speech, status, container, targeting, gump, effect packets
+- [x] Character model with 58 skills and stat system
+- [x] Combat system with UO formulas
+- [x] Item/inventory system with equipment layers
+- [x] World/map data structures for all 6 UO maps
+- [x] `.mul` map file parser
+- [x] Spell system (64 magery spells)
+- [x] Crafting, loot, vendor, resource gathering systems
+- [x] Housing with decay, security, lockdowns
+- [x] Guild, party, quest systems
+- [x] Account management with access levels
+- [x] GM command system
+- [x] Event bus for game mechanics
+
+### Next Steps
+
+- [ ] Wire game systems into the TCP packet loop (handle in-game packets end-to-end)
+- [ ] Load UO map/art data files on startup
+- [ ] Implement world persistence (save/load game state to disk)
+- [ ] Add pathfinding / movement validation using map data
+- [ ] Client version validation and feature gating
+- [ ] Database-backed account and world storage
+
+## License
+
+This project is open source. Contributions welcome.
