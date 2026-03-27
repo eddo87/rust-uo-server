@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use crate::character::Character;
 use crate::movement::Position;
@@ -99,6 +100,8 @@ pub struct Connection {
     pub character: Option<Character>,
     /// Serial of the mobile this player is currently targeting for combat.
     pub target_serial: Option<u32>,
+    /// Timestamp of the last resolved swing, used to enforce the swing timer.
+    pub last_swing: Option<Instant>,
 }
 
 impl Connection {
@@ -119,6 +122,7 @@ impl Connection {
             serial: (id as u32).wrapping_add(1),
             character: None,
             target_serial: None,
+            last_swing: None,
         }
     }
 

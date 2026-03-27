@@ -235,6 +235,12 @@ pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
     Some((slot, name))
 }
 
+/// Builds a Resurrect packet (0x2C) to restore a ghost to living status.
+pub fn resurrect_packet() -> [u8; 2] { [0x2C, 0x01] }
+
+/// Builds a Ghost Mode packet (0x2C) sent when a player dies.
+pub fn ghost_mode_packet() -> [u8; 2] { [0x2C, 0x02] }
+
 /// Builds a Damage notification packet (0x0B).
 ///
 /// Sent to inform a client of damage taken.  7 bytes total.
@@ -553,6 +559,12 @@ mod tests {
     fn parse_speech_request_returns_none_for_wrong_id() {
         let data = vec![0x1C, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         assert!(parse_speech_request(&data).is_none());
+    }
+
+    #[test]
+    fn resurrect_and_ghost_mode_packets() {
+        assert_eq!(resurrect_packet(), [0x2C, 0x01]);
+        assert_eq!(ghost_mode_packet(), [0x2C, 0x02]);
     }
 
     #[test]

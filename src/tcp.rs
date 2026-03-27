@@ -7,8 +7,10 @@ use async_std::{
     task,
 };
 use log::{debug, info, trace, warn};
+use std::time::Instant;
+
 use crate::character::Character;
-use crate::combat::{ArmorStats, WeaponStats, WeaponType, resolve_combat_round};
+use crate::combat::{ArmorStats, WeaponStats, WeaponType, calculate_swing_delay, resolve_combat_round};
 use crate::error::ServerError;
 use crate::huffman;
 use crate::connections::ConnectionManager;
@@ -173,6 +175,23 @@ pub fn start(connections: ConnectionManager, map_data: Arc<Option<MapData>>) -> 
     info!("Starting TCP server on 127.0.0.1:2593");
     task::block_on(accept_loop("127.0.0.1:2593", connections, map_data))
 }
+
+// ---------------------------------------------------------------------------
+// Static world data
+// ---------------------------------------------------------------------------
+
+/// Known Ankh of Sacrifice positions on Felucca.
+/// A dead player within 3 tiles of any of these can be resurrected.
+const ANKH_POSITIONS: &[(u16, u16)] = &[
+    (1457, 1537), // Britain Cemetery
+    (1499, 1775), // Britain South Healer
+    (547,  1047), // Yew Healer
+    (1838, 2820), // Trinsic Healer
+    (2726, 693),  // Vesper Healer
+    (591,  2245), // Skara Brae Healer
+    (4431, 1178), // Moonglow Healer
+    (2497, 392),  // Minoc Healer
+];
 
 // ---------------------------------------------------------------------------
 // Packet handler dispatch
@@ -355,14 +374,15 @@ async fn handle_packet(
             if packet.len() < 5 { return Ok(()); }
             let target_serial = u32::from_be_bytes([packet[1], packet[2], packet[3], packet[4]]);
 
-            // Record target and verify attacker is alive
-            let attacker_alive = connections
+            // Must be alive AND in war mode to attack; record target serial
+            let (attacker_alive, atk_war_mode) = connections
                 .with_connection_mut(conn_id, |c| {
                     c.target_serial = Some(target_serial);
-                    c.character.as_ref().map(|ch| ch.is_alive).unwrap_or(false)
+                    let alive = c.character.as_ref().map(|ch| ch.is_alive).unwrap_or(false);
+                    (alive, c.war_mode)
                 })
-                .unwrap_or(false);
-            if !attacker_alive { return Ok(()); }
+                .unwrap_or((false, false));
+            if !attacker_alive || !atk_war_mode { return Ok(()); }
 
             // Locate target connection
             let Some(target_id) = connections.find_by_serial(target_serial) else {
@@ -374,6 +394,22 @@ async fn handle_packet(
             let Some(ref atk) = attacker_snap else { return Ok(()); };
             let Some(ref atk_ch) = atk.character else { return Ok(()); };
             if !atk_ch.is_alive { return Ok(()); }
+
+            // Swing timer: enforce per-character cooldown based on dex/stamina
+            let swing_secs = calculate_swing_delay(
+                35, // fists speed
+                atk_ch.derived_stats.stamina.current,
+                atk_ch.stats.dexterity,
+            );
+            let can_swing = atk.last_swing
+                .map(|t| t.elapsed().as_secs_f32() >= swing_secs)
+                .unwrap_or(true);
+            if !can_swing {
+                debug!("Swing timer: conn {} must wait ({:.1}s cooldown)", conn_id, swing_secs);
+                return Ok(());
+            }
+            connections.with_connection_mut(conn_id, |c| c.last_swing = Some(Instant::now()));
+
             let atk_pos = atk.position.unwrap_or(Position { x: 1496, y: 1628, z: 10 });
             let atk_str = atk_ch.stats.strength;
             let atk_skill = atk_ch.skills
@@ -450,15 +486,44 @@ async fn handle_packet(
 
                 if target_died {
                     info!("Player {} died", tgt_name);
-                    // Tell the dead player's client to show the death screen
-                    connections.send_to(target_id, compress_packet(&[0x2C, 0x02]));
+                    connections.send_to(target_id, compress_packet(&packets::ghost_mode_packet()));
                 }
             } else {
                 debug!("Combat: conn {} missed serial {}", conn_id, target_serial);
             }
         }
 
-        0x06 | 0x09 => { /* double/single click — ignored for now */ }
+        0x06 => {
+            // Double-click — resurrect at Ankh when dead, ignore otherwise.
+            let (is_dead, pos) = {
+                let conn = connections.get_connection(conn_id);
+                let dead = conn.as_ref()
+                    .and_then(|c| c.character.as_ref())
+                    .map(|ch| !ch.is_alive)
+                    .unwrap_or(false);
+                let pos = conn.as_ref()
+                    .and_then(|c| c.position)
+                    .unwrap_or(Position { x: 1496, y: 1628, z: 10 });
+                (dead, pos)
+            };
+            if is_dead {
+                let near_ankh = ANKH_POSITIONS.iter().any(|&(ax, ay)| {
+                    let dx = (pos.x as i32 - ax as i32).unsigned_abs() as u16;
+                    let dy = (pos.y as i32 - ay as i32).unsigned_abs() as u16;
+                    dx <= 3 && dy <= 3
+                });
+                if near_ankh {
+                    resurrect_player(conn_id, connections);
+                } else {
+                    let msg = packets::system_message_packet(
+                        "You must be near an Ankh of Sacrifice to resurrect.",
+                    );
+                    connections.send_to(conn_id, compress_packet(&msg));
+                }
+            }
+        }
+
+        0x09 => { /* single-click — ignored */ }
 
         0x72 => {
             // War mode toggle from client: [war_flag, unk, unk, unk]
@@ -471,9 +536,15 @@ async fn handle_packet(
         }
 
         0xAD => {
-            // Speech request — broadcast to nearby players as ASCII speech.
+            // Speech request — route `[commands` or broadcast to nearby.
             if let Some((speech_type, hue, font, text)) = packets::parse_speech_request(packet) {
                 debug!("Speech from conn {}: {:?}", conn_id, text);
+
+                if text.starts_with('[') {
+                    handle_command(text.trim_start_matches('['), conn_id, connections);
+                    return Ok(());
+                }
+
                 let (serial, name, pos) = {
                     let conn = connections.get_connection(conn_id);
                     let serial = conn.as_ref().map(|c| c.serial).unwrap_or(1);
@@ -491,7 +562,6 @@ async fn handle_packet(
                     serial, 0x0190, speech_type, hue, font, &name, &text,
                 );
                 let compressed = compress_packet(&pkt);
-                // Broadcast to nearby (excluding self) and also echo to self.
                 connections.broadcast_to_range(conn_id, pos, 12, compressed.clone());
                 connections.send_to(conn_id, compressed);
             }
@@ -733,6 +803,57 @@ fn apply_movement(pos: Position, dir: Direction) -> Position {
 }
 
 // ---------------------------------------------------------------------------
+// Command handler
+// ---------------------------------------------------------------------------
+
+/// Handle a `[command` typed in chat.  `cmd` is the text after the `[`.
+fn handle_command(cmd: &str, conn_id: u64, connections: &ConnectionManager) {
+    match cmd.trim().to_lowercase().as_str() {
+        "res" => resurrect_player(conn_id, connections),
+        _ => {
+            let msg = packets::system_message_packet(
+                &format!("Unknown command: [{}. Try [res", cmd.trim()),
+            );
+            connections.send_to(conn_id, compress_packet(&msg));
+        }
+    }
+}
+
+/// Restore a dead player to life with 10 % of max HP.
+///
+/// Sends the resurrect packet (0x2C), an updated status bar, and a system
+/// message.  Does nothing if the player is already alive.
+fn resurrect_player(conn_id: u64, connections: &ConnectionManager) {
+    let resurrected = connections
+        .with_connection_mut(conn_id, |c| {
+            if let Some(ref mut ch) = c.character {
+                if !ch.is_alive {
+                    ch.is_alive = true;
+                    let restored = (ch.derived_stats.hit_points.max / 10).max(1);
+                    ch.derived_stats.hit_points.current = restored;
+                    return true;
+                }
+            }
+            false
+        })
+        .unwrap_or(false);
+
+    if !resurrected {
+        return;
+    }
+
+    connections.send_to(conn_id, compress_packet(&packets::resurrect_packet()));
+
+    if let Some(status_pkt) = build_status_packet_for(conn_id, connections) {
+        connections.send_to(conn_id, compress_packet(&status_pkt));
+    }
+
+    let msg = packets::system_message_packet("You have been resurrected.");
+    connections.send_to(conn_id, compress_packet(&msg));
+    info!("Connection {} resurrected", conn_id);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -768,6 +889,14 @@ mod tests {
         assert_eq!(&pkt[7..13], b"Player");
         assert!(pkt[13..37].iter().all(|&b| b == 0));
         assert_eq!(pkt[42], 0x00);
+    }
+
+    #[test]
+    fn ankh_positions_are_all_in_felucca_bounds() {
+        for &(x, y) in super::ANKH_POSITIONS {
+            assert!(x < 7168, "Ankh x={} out of Felucca bounds", x);
+            assert!(y < 4096, "Ankh y={} out of Felucca bounds", y);
+        }
     }
 
     #[test]
