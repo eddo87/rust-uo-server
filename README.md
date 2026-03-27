@@ -2,7 +2,8 @@
 
 A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server implementation written in Rust. UO is a fantasy MMORPG originally released in 1997 that still has an active community running free shards on open-source server implementations (most notably [ServUO](https://github.com/ServUO/ServUO) in C#). This project aims to provide a Rust alternative with strong type safety, memory safety, and the performance characteristics Rust is known for.
 
-> **Status:** Active development. 57 source files, ~22,800 lines of Rust, 841 tests passing.
+> **Status:** Active development. ~60 source files, ~25,000 lines of Rust, 864 tests passing.
+> A UO client (ClassicUO) can connect, log in, walk around Britain, fight a static Dragon NPC, and PvP against other players with a full ghost/resurrection cycle.
 
 ## Architecture
 
@@ -42,7 +43,7 @@ A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server
 
 | Module | Packets |
 |--------|---------|
-| `tcp/packets` | Login flow: 0xEF, 0x80, 0xA0, 0x91 + server list, redirect, features, character list |
+| `tcp/packets` | Login flow: 0xEF, 0x80, 0xA0, 0x91 + server list, redirect, features, character list; 0x78 Mobile Incoming, 0x20 Mobile Update, 0x0B Damage Notification, 0x1D Remove Entity, 0x2C Ghost/Resurrect |
 | `movement` | 0x02 request, 0x20 draw player, 0x21 reject, 0x22 acknowledge |
 | `speech` | 0x1C ASCII, 0xAD unicode parse, 0xAE unicode send, system messages |
 | `status_packets` | 0x11 status bar (type flags 0-4 incl. AOS), 0x3A skill updates |
@@ -82,6 +83,7 @@ A performant [Ultima Online](https://en.wikipedia.org/wiki/Ultima_Online) server
 | `world_state` | Thread-safe world state container with dirty-flag auto-save |
 | `char_slots` | Per-account character slot management (up to 7 slots), JSON persistence |
 | `pathfinding` | A\* pathfinding over `MapData` with passability checks and 48-tile range limit |
+| `npc` | Thread-safe NPC registry (`NpcManager`); `Npc::dragon()` static mob with resistances and defense skill |
 
 ## Getting Started
 
@@ -118,7 +120,7 @@ starting_city = "Britain"
 cargo test
 ```
 
-799 tests covering packet construction/parsing, game mechanics, data structures, and edge cases.
+864 tests covering packet construction/parsing, game mechanics, data structures, and edge cases.
 
 ## Log Levels
 
@@ -185,10 +187,25 @@ The original author has been documenting progress on a [public journal](https://
 - [x] A\* pathfinding over live map data with passability checks
 - [x] Movement validation using map passability (impassable tiles rejected in TCP handler)
 - [x] Client version validation (0x82 login deny for clients older than 4.0.0.0)
+- [x] Accumulator-based TCP framing (handles fragmented reads over internet connections)
+- [x] Account authentication wired end-to-end (0x80 → `authenticate()` → 0x82 deny or proceed)
+- [x] Character linked to TCP session (`Connection::character: Option<Character>` with real stats)
+- [x] Character persistence (full stats + skills saved on shutdown and every 5 minutes)
+- [x] In-range broadcast system (`broadcast_to_range` Chebyshev; players see each other on login and movement)
+- [x] Chat (0xAD speech broadcast to nearby players; `[command` prefix routes to GM command registry)
+- [x] War mode toggle (0x72 client packet tracked per connection)
+- [x] PvP combat (0x05 attack: war mode gate, swing timer, range check, UO hit/damage formulas, 0x0B damage notification, 0x11 status broadcast)
+- [x] Death and ghost mode (0x2C ghost packet on HP ≤ 0)
+- [x] Resurrection at Ankh shrines (0x06 double-click near shrine → HP restore + 0x2C living)
+- [x] `[res` GM command for out-of-band resurrection
+- [x] Static Dragon NPC (2000 HP, 40/100/20/40/40 resistances, visible on login, attackable, removed on death via 0x1D)
 
 ### Next Steps
 
-- [ ] Database-backed account and world storage
+- [ ] Faction system (Order vs Chaos): faction assignment, notoriety on 0x78, kill attribution, team chat
+- [ ] Death broadcast to nearby players (0x17 ghost body)
+- [ ] NPC re-visibility when player walks into range mid-session
+- [ ] Skill gain on combat actions
 
 ## License
 
