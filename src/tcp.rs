@@ -16,8 +16,9 @@ use crate::huffman;
 use crate::connections::ConnectionManager;
 use crate::connection::ConnectionState;
 use crate::map_files::MapData;
-use crate::movement::{Direction, MovementRequest, Position};
-use crate::npc::NpcManager;
+use crate::movement::{Direction, MovementRequest, Position, encode_direction};
+use crate::npc::{NpcManager, BANKER_SERIAL};
+use crate::container_packets::{ContainerItem, open_container_gump_packet, container_contents_packet};
 
 mod packets;
 
@@ -55,6 +56,10 @@ fn required_packet_length(id: u8, buf: &[u8]) -> Option<usize> {
         0x91 => Some(65), // game server login
         0xA0 => Some(3),  // server select
         0xAD => {         // speech request (variable length)
+            if buf.len() < 3 { return None; }
+            Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
+        }
+        0xBD => {         // ClientVersion string (variable length)
             if buf.len() < 3 { return None; }
             Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
         }
@@ -452,10 +457,10 @@ async fn handle_packet(
                     let ack = packets::movement_ack_packet(req.sequence_number, 0x01);
                     connections.send_to(conn_id, ack.to_vec());
 
-                    // Let nearby players see the movement.
+                    // Let nearby players see the movement (preserve running flag).
                     let upd = packets::mobile_update_packet(
                         serial, 0x0190, new_pos.x, new_pos.y, new_pos.z,
-                        req.direction.to_byte(), 0x0000, 0x00,
+                        encode_direction(req.direction, req.running), 0x0000, 0x00,
                     );
                     connections.broadcast_to_range(conn_id, new_pos, 18, compress_packet(&upd));
 
@@ -639,19 +644,115 @@ async fn handle_packet(
         }
 
         0x06 => {
-            // Double-click — resurrect at Ankh when dead, ignore otherwise.
-            let (is_dead, pos) = {
+            // Double-click dispatch: paperdoll / backpack / mount / bank / resurrection.
+            let target_serial = if body.len() >= 4 {
+                u32::from_be_bytes([body[0], body[1], body[2], body[3]])
+            } else {
+                0
+            };
+
+            let (is_dead, own_serial, body_type, pos, dir, hue, char_name,
+                 backpack_serial, statuette_serial, mount_item_serial,
+                 bank_box_serial, mounted) = {
                 let conn = connections.get_connection(conn_id);
                 let dead = conn.as_ref()
                     .and_then(|c| c.character.as_ref())
                     .map(|ch| !ch.is_alive)
                     .unwrap_or(false);
-                let pos = conn.as_ref()
-                    .and_then(|c| c.position)
+                let serial  = conn.as_ref().map(|c| c.serial).unwrap_or(0);
+                let btype   = conn.as_ref()
+                    .and_then(|c| c.character.as_ref()).map(|ch| ch.body_type).unwrap_or(0x0190);
+                let pos     = conn.as_ref().and_then(|c| c.position)
                     .unwrap_or(Position { x: 1496, y: 1628, z: 10 });
-                (dead, pos)
+                let dir     = conn.as_ref()
+                    .and_then(|c| c.character.as_ref()).map(|ch| ch.direction).unwrap_or(0);
+                let hue     = conn.as_ref()
+                    .and_then(|c| c.character.as_ref()).map(|ch| ch.hue).unwrap_or(0);
+                let name    = conn.as_ref().and_then(|c| c.character_name.clone()).unwrap_or_default();
+                let bp      = conn.as_ref().map(|c| c.backpack_serial).unwrap_or(0);
+                let stat    = conn.as_ref().map(|c| c.statuette_serial).unwrap_or(0);
+                let mnt     = conn.as_ref().map(|c| c.mount_item_serial).unwrap_or(0);
+                let bnk     = conn.as_ref().map(|c| c.bank_box_serial).unwrap_or(0);
+                let is_mnt  = conn.as_ref().map(|c| c.mounted).unwrap_or(false);
+                (dead, serial, btype, pos, dir, hue, name, bp, stat, mnt, bnk, is_mnt)
             };
-            if is_dead {
+
+            if target_serial == own_serial && own_serial != 0 && !is_dead {
+                // Open own paperdoll.
+                let pkt = packets::open_paperdoll_packet(own_serial, &char_name, false);
+                connections.send_to(conn_id, compress_packet(&pkt));
+
+            } else if target_serial == backpack_serial && backpack_serial != 0 {
+                // Open backpack container; show the ethereal horse statuette inside.
+                let open = open_container_gump_packet(backpack_serial, BACKPACK_GUMP);
+                connections.send_to(conn_id, compress_packet(&open));
+                let items = [ContainerItem {
+                    serial: statuette_serial,
+                    item_id: ETH_HORSE_GRAPHIC,
+                    offset: 0,
+                    amount: 1,
+                    x: 50,
+                    y: 50,
+                    grid_index: 0,
+                    container_serial: backpack_serial,
+                    hue: 0,
+                }];
+                let contents = container_contents_packet(&items);
+                connections.send_to(conn_id, compress_packet(&contents));
+                info!("Opened backpack for conn {}", conn_id);
+
+            } else if target_serial == statuette_serial && statuette_serial != 0 {
+                // Toggle mount on/off.
+                let now_mounted = !mounted;
+                connections.with_connection_mut(conn_id, |c| c.mounted = now_mounted);
+
+                if now_mounted {
+                    // Resend 0x78 with mount item in layer 0x19.
+                    let equip = [packets::MobileEquipEntry {
+                        serial: mount_item_serial,
+                        graphic: HORSE_MOUNT_BODY,
+                        layer: LAYER_MOUNT,
+                        hue: 0,
+                    }];
+                    let pkt = packets::mobile_incoming_with_equip_packet(
+                        own_serial, body_type, pos.x, pos.y, pos.z,
+                        dir, hue, 0x00, 0x03, &equip,
+                    );
+                    let compressed = compress_packet(&pkt);
+                    connections.send_to(conn_id, compressed.clone());
+                    connections.broadcast_to_range(conn_id, pos, 18, compressed);
+                    info!("Mounted player {} (conn {})", own_serial, conn_id);
+                } else {
+                    // Resend 0x78 without mount item.
+                    let pkt = packets::mobile_incoming_packet(
+                        own_serial, body_type, pos.x, pos.y, pos.z,
+                        dir, hue, 0x00, 0x03,
+                    );
+                    let compressed = compress_packet(&pkt);
+                    connections.send_to(conn_id, compressed.clone());
+                    connections.broadcast_to_range(conn_id, pos, 18, compressed);
+                    info!("Dismounted player {} (conn {})", own_serial, conn_id);
+                }
+
+            } else if target_serial == BANKER_SERIAL
+                || npc_manager.get(target_serial).map(|n| n.name == "Banker").unwrap_or(false)
+            {
+                // Banker says hello then opens the player's bank box.
+                let greeting = packets::player_speech_packet(
+                    BANKER_SERIAL, 0x0190, 0x00, 0x003B, 0x0003,
+                    "Banker",
+                    "Welcome to the Britain bank. How may I help you?",
+                );
+                connections.send_to(conn_id, compress_packet(&greeting));
+                if bank_box_serial != 0 {
+                    let open = open_container_gump_packet(bank_box_serial, BANK_GUMP);
+                    connections.send_to(conn_id, compress_packet(&open));
+                    let contents = container_contents_packet(&[]);
+                    connections.send_to(conn_id, compress_packet(&contents));
+                    info!("Opened bank for conn {}", conn_id);
+                }
+
+            } else if is_dead {
                 let near_ankh = ANKH_POSITIONS.iter().any(|&(ax, ay)| {
                     let dx = (pos.x as i32 - ax as i32).unsigned_abs() as u16;
                     let dy = (pos.y as i32 - ay as i32).unsigned_abs() as u16;
@@ -668,7 +769,19 @@ async fn handle_packet(
             }
         }
 
-        0x09 => { /* single-click — ignored */ }
+        0x09 => {
+            // Single-click: show NPC name as overhead label.
+            if body.len() >= 4 {
+                let target = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+                if let Some(npc) = npc_manager.get(target) {
+                    let label = packets::player_speech_packet(
+                        npc.serial, npc.body_type, 0x06, 0x0058, 0x0003,
+                        &npc.name, &npc.name,
+                    );
+                    connections.send_to(conn_id, compress_packet(&label));
+                }
+            }
+        }
 
         0x34 => {
             // MobileQuery — client requests stats (type=4) or skills (type=5)
@@ -678,7 +791,7 @@ async fn handle_packet(
             }
         }
 
-        0xB5 | 0xBF => { /* client feature/chat notifications — no response needed */ }
+        0xB5 | 0xBD | 0xBF | 0xD6 => { /* client info/feature packets — no response needed */ }
 
         0x72 => {
             // War mode toggle from client: [war_flag, unk, unk, unk]
@@ -743,11 +856,40 @@ fn compress_packet(src: &[u8]) -> Vec<u8> {
     output
 }
 
+/// Item serial bases for per-player items derived from the player's serial.
+const BACKPACK_SERIAL_BASE: u32 = 0x4000_0000;
+const STATUETTE_SERIAL_BASE: u32 = 0x4001_0000;
+const MOUNT_ITEM_SERIAL_BASE: u32 = 0x4002_0000;
+const BANK_BOX_SERIAL_BASE: u32 = 0x5000_0000;
+
+/// Ethereal horse statuette item graphic (item art ID).
+const ETH_HORSE_GRAPHIC: u16 = 0x20DD;
+/// Horse body type used as the mount graphic in layer 0x19 of 0x78.
+const HORSE_MOUNT_BODY: u16 = 0x00C8;
+/// UO protocol layer for the backpack (0x15 = 21).
+const LAYER_BACKPACK: u8 = 0x15;
+/// UO protocol layer for mounts (0x19 = 25).
+const LAYER_MOUNT: u8 = 0x19;
+/// Backpack container item graphic.
+const BACKPACK_GRAPHIC: u16 = 0x0E75;
+/// Open-container gump ID for a backpack.
+const BACKPACK_GUMP: u16 = 0x003C;
+/// Open-container gump ID for a bank box.
+const BANK_GUMP: u16 = 0x0009;
+
 /// Enqueue the full in-game initialisation sequence for a newly-entered player.
 fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, ch: &Character) {
     use crate::status_packets::{StatBarData, StatusTypeFlag, build_status_bar_packet};
 
     let serial = ch.serial;
+
+    // Assign per-player item serials derived from the character serial.
+    connections.with_connection_mut(conn_id, |c| {
+        c.backpack_serial     = BACKPACK_SERIAL_BASE  | serial;
+        c.statuette_serial    = STATUETTE_SERIAL_BASE | serial;
+        c.mount_item_serial   = MOUNT_ITEM_SERIAL_BASE | serial;
+        c.bank_box_serial     = BANK_BOX_SERIAL_BASE  | serial;
+    });
     let x = ch.position.0;
     let y = ch.position.1;
     let z = ch.position.2;
@@ -802,6 +944,12 @@ fn send_login_init_sequence(conn_id: u64, connections: &ConnectionManager, ch: &
     // 0x55 Login Complete
     connections.send_to(conn_id, compress_packet(&packets::login_complete_packet()));
     debug!("Queued Login Complete (0x55)");
+
+    // 0x2E Equip Item: attach the backpack to the player's body so the client shows it.
+    let backpack_serial = BACKPACK_SERIAL_BASE | serial;
+    let equip_bp = packets::equip_item_packet(backpack_serial, BACKPACK_GRAPHIC, LAYER_BACKPACK, serial, 0);
+    connections.send_to(conn_id, compress_packet(&equip_bp));
+    debug!("Queued Equip Backpack (0x2E, serial 0x{:08X})", backpack_serial);
 
     info!("In-game init sequence queued for serial 0x{:08X}", serial);
 }

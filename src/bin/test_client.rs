@@ -90,6 +90,22 @@ impl UoClient {
         }
         Ok(std::mem::take(&mut self.acc))
     }
+
+    /// Like recv_game_bytes but uses a 1-second timeout and returns Ok(empty vec)
+    /// on timeout instead of an error.  Used to drain optional/trailing data.
+    async fn recv_game_bytes_optional(&mut self) -> Result<Vec<u8>, String> {
+        if !self.acc.is_empty() {
+            return Ok(std::mem::take(&mut self.acc));
+        }
+        let mut buf = [0u8; 4096];
+        match async_std::io::timeout(Duration::from_secs(2), self.stream.read(&mut buf)).await {
+            Ok(n) if n > 0 => {
+                self.acc.extend_from_slice(&buf[..n]);
+                Ok(std::mem::take(&mut self.acc))
+            }
+            _ => Ok(vec![]),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +158,13 @@ fn pkt_91(auth_key: &[u8; 4], username: &str, password: &str) -> Vec<u8> {
     p[..pb.len().min(29)].copy_from_slice(&pb[..pb.len().min(29)]);
     v.extend_from_slice(&p);
     v // 65 bytes
+}
+
+/// 0x06 — DoubleClick
+fn pkt_double_click(serial: u32) -> Vec<u8> {
+    let mut v = vec![0x06u8];
+    v.extend_from_slice(&serial.to_be_bytes());
+    v
 }
 
 /// 0xF8 — CreateCharacter (7.0.16+ clients), 106 bytes.
@@ -306,6 +329,82 @@ async fn scenario_game_server(auth_key: [u8; 4], r: &mut Results) -> bool {
     true
 }
 
+/// Item-interaction phase: fresh connection → login → char create → double-click serials.
+async fn scenario_items(r: &mut Results) {
+    println!("\n[Item Interactions]");
+
+    // 1. Fresh connection
+    let mut client = match UoClient::connect("127.0.0.1:2593").await {
+        Ok(c) => { r.pass("items: connect"); c }
+        Err(e) => { r.fail("items: connect", &e); return; }
+    };
+
+    // 2. Auth seed (4 null bytes)
+    let seed = [0x00u8, 0x00, 0x00, 0x00];
+    if let Err(e) = client.send(&seed).await {
+        r.fail("items: send auth seed", &e);
+        return;
+    }
+    r.pass("items: send auth seed");
+
+    // 3. 0x91 game login
+    if let Err(e) = client.send(&pkt_91(&seed, "testuser", "testpass")).await {
+        r.fail("items: send game login (0x91)", &e);
+        return;
+    }
+    r.pass("items: send game login (0x91)");
+
+    // 4. Drain features + char list
+    match client.recv_game_bytes().await {
+        Ok(b) if !b.is_empty() => r.pass("items: receive features + char list"),
+        Ok(_) => { r.fail("items: receive features + char list", "no data received"); return; }
+        Err(e) => { r.fail("items: receive features + char list", &e); return; }
+    }
+
+    // 5. Send char create
+    if let Err(e) = client.send(&pkt_f8("TestHero")).await {
+        r.fail("items: send char create (0xF8)", &e);
+        return;
+    }
+    r.pass("items: send char create (0xF8)");
+
+    // 6. Sleep 300 ms to let server finish init sequence
+    async_std::task::sleep(Duration::from_millis(300)).await;
+
+    // 7. Drain any pending bytes with a short optional timeout
+    let _ = client.recv_game_bytes_optional().await;
+
+    // 8. Double-click backpack (serial 0x40000001) → expect 0x24 open container + 0x3C contents
+    r.check("items: double-click backpack (0x40000001) → 0x24 open container", async {
+        client.send(&pkt_double_click(0x40000001u32)).await?;
+        let bytes = client.recv_game_bytes_optional().await?;
+        if bytes.is_empty() {
+            return Err("no response to backpack double-click (timeout)".into());
+        }
+        Ok(())
+    }.await);
+
+    // 9. Double-click statuette (serial 0x40010001) → expect 0x78 with mount
+    r.check("items: double-click statuette (0x40010001) → 0x78 mount", async {
+        client.send(&pkt_double_click(0x40010001u32)).await?;
+        let bytes = client.recv_game_bytes_optional().await?;
+        if bytes.is_empty() {
+            return Err("no response to statuette double-click (timeout)".into());
+        }
+        Ok(())
+    }.await);
+
+    // 10. Double-click banker NPC (serial 0x00001001) → expect 0x24 bank + 0x3C
+    r.check("items: double-click banker NPC (0x00001001) → 0x24 bank box", async {
+        client.send(&pkt_double_click(0x00001001u32)).await?;
+        let bytes = client.recv_game_bytes_optional().await?;
+        if bytes.is_empty() {
+            return Err("no response to banker double-click (timeout)".into());
+        }
+        Ok(())
+    }.await);
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -323,6 +422,8 @@ async fn run() -> Results {
     } else {
         println!("\n[Game Server] — skipped (login server phase failed)");
     }
+
+    scenario_items(&mut r).await;
 
     r
 }

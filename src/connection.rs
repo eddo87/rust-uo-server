@@ -102,6 +102,16 @@ pub struct Connection {
     pub target_serial: Option<u32>,
     /// Timestamp of the last resolved swing, used to enforce the swing timer.
     pub last_swing: Option<Instant>,
+    /// Serial of this player's backpack container (0 = not yet assigned).
+    pub backpack_serial: u32,
+    /// Serial of the ethereal horse statuette item inside the backpack.
+    pub statuette_serial: u32,
+    /// Virtual serial used as the mount item in 0x78 equipment layer 0x19.
+    pub mount_item_serial: u32,
+    /// Serial of this player's bank box container.
+    pub bank_box_serial: u32,
+    /// Whether the player is currently riding a mount.
+    pub mounted: bool,
 }
 
 impl Connection {
@@ -123,6 +133,11 @@ impl Connection {
             character: None,
             target_serial: None,
             last_swing: None,
+            backpack_serial: 0,
+            statuette_serial: 0,
+            mount_item_serial: 0,
+            bank_box_serial: 0,
+            mounted: false,
         }
     }
 

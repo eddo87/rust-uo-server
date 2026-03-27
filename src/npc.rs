@@ -60,6 +60,34 @@ impl Npc {
             flags: 0x00,
         }
     }
+
+    /// Create a Banker NPC at the given position.
+    ///
+    /// Bankers are blue (innocent) and open the player's bank box on double-click.
+    pub fn banker(serial: u32, position: Position) -> Self {
+        Npc {
+            serial,
+            name: "Banker".to_string(),
+            body_type: 0x0190, // standard male human
+            hue: 0x0000,
+            position,
+            map_id: 0,
+            direction: 0x04,
+            hit_points: 30_000,
+            max_hit_points: 30_000,
+            armor: ArmorStats {
+                physical_resist: 0,
+                fire_resist: 0,
+                cold_resist: 0,
+                poison_resist: 0,
+                energy_resist: 0,
+            },
+            defense_skill: 0.0,
+            is_alive: true,
+            notoriety: 0x01, // innocent (blue)
+            flags: 0x00,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +175,9 @@ impl Default for NpcManager {
 /// First serial in the NPC range.  Player serials are 1–7 (slots 0–6),
 /// so 0x0000_1000 (4096) gives ample separation.
 pub const NPC_SERIAL_BASE: u32 = 0x0000_1000;
+
+/// Serial of the Britain bank Banker NPC.
+pub const BANKER_SERIAL: u32 = NPC_SERIAL_BASE + 1;
 
 // ---------------------------------------------------------------------------
 // Tests

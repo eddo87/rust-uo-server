@@ -80,7 +80,7 @@ pub fn movement_reject_packet(sequence: u8, position: Position, direction: Direc
     buffer
 }
 
-pub fn draw_player_packet(serial: u32, body_type: u16, hue: u16, status_flags: u8, position: Position, direction: Direction, notoriety: u8) -> [u8; 19] {
+pub fn draw_player_packet(serial: u32, body_type: u16, hue: u16, status_flags: u8, position: Position, direction: Direction, _notoriety: u8) -> [u8; 19] {
     let mut buffer: [u8; 19] = [0; 19];
     buffer[0] = 0x20;
     BigEndian::write_u32(&mut buffer[1..5], serial);
@@ -90,9 +90,10 @@ pub fn draw_player_packet(serial: u32, body_type: u16, hue: u16, status_flags: u
     buffer[10] = status_flags;
     BigEndian::write_u16(&mut buffer[11..13], position.x);
     BigEndian::write_u16(&mut buffer[13..15], position.y);
-    BigEndian::write_u16(&mut buffer[15..17], 0x0000);
-    buffer[17] = direction.to_byte() | (notoriety & 0x03);
-    buffer[18] = position.z as u8;
+    buffer[15] = 0x00;
+    buffer[16] = direction.to_byte();
+    buffer[17] = position.z as u8;
+    buffer[18] = 0x00;
     buffer
 }
 
@@ -254,6 +255,44 @@ pub fn resurrect_packet() -> [u8; 2] { [0x2C, 0x01] }
 /// Builds a Ghost Mode packet (0x2C) sent when a player dies.
 pub fn ghost_mode_packet() -> [u8; 2] { [0x2C, 0x02] }
 
+/// Builds an Equip Item packet (0x2E).
+///
+/// Tells the client that `item_serial` with graphic `item_id` has been
+/// equipped on `mobile_serial` at the given `layer`.  15 bytes total.
+pub fn equip_item_packet(
+    item_serial: u32,
+    item_id: u16,
+    layer: u8,
+    mobile_serial: u32,
+    hue: u16,
+) -> [u8; 15] {
+    let mut buf = [0u8; 15];
+    buf[0] = 0x2E;
+    BigEndian::write_u32(&mut buf[1..5], item_serial);
+    BigEndian::write_u16(&mut buf[5..7], item_id);
+    buf[7] = 0x00; // unknown
+    buf[8] = layer;
+    BigEndian::write_u32(&mut buf[9..13], mobile_serial);
+    BigEndian::write_u16(&mut buf[13..15], hue);
+    buf
+}
+
+/// Builds an Open Paperdoll packet (0x88).
+///
+/// Sent to a client to open the paperdoll gump for the specified mobile.
+/// Total size: 66 bytes — serial (4) + title/name (60 bytes, null-padded) + flags (1).
+/// flags: 0x00 = not warmode, 0x01 = alterations allowed (always safe to send 0x00).
+pub fn open_paperdoll_packet(serial: u32, name: &str, war_mode: bool) -> [u8; 66] {
+    let mut buf = [0u8; 66];
+    buf[0] = 0x88;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(59);
+    buf[5..5 + name_len].copy_from_slice(&name_bytes[..name_len]);
+    buf[65] = if war_mode { 0x01 } else { 0x00 };
+    buf
+}
+
 /// Builds a Damage notification packet (0x0B).
 ///
 /// Sent to inform a client of damage taken.  7 bytes total.
@@ -299,6 +338,62 @@ pub fn mobile_incoming_packet(
     buf.push(notoriety);
     buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
 
+    buf
+}
+
+/// An item entry for the equipment list inside 0x78 Mobile Incoming.
+pub struct MobileEquipEntry {
+    pub serial: u32,
+    pub graphic: u16,
+    pub layer: u8,
+    pub hue: u16, // 0 = no hue
+}
+
+/// Builds a Mobile Incoming packet (0x78) that includes equipment items.
+///
+/// Identical to `mobile_incoming_packet` but appends an equipment list
+/// (e.g. the mount in layer 0x19) before the terminator.
+pub fn mobile_incoming_with_equip_packet(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i8,
+    direction: u8,
+    hue: u16,
+    flags: u8,
+    notoriety: u8,
+    equip: &[MobileEquipEntry],
+) -> Vec<u8> {
+    // Base (no items, no terminator): 1+2+4+2+2+2+1+1+2+1+1 = 19 bytes
+    // Each item: 4+2+1 = 7 bytes (+ 2 if hue != 0)
+    // Terminator: 4 bytes
+    let item_bytes: usize = equip.iter().map(|e| if e.hue != 0 { 9 } else { 7 }).sum();
+    let length = (19 + item_bytes + 4) as u16;
+
+    let mut buf = Vec::with_capacity(length as usize);
+    buf.push(0x78);
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(&serial.to_be_bytes());
+    buf.extend_from_slice(&body.to_be_bytes());
+    buf.extend_from_slice(&x.to_be_bytes());
+    buf.extend_from_slice(&y.to_be_bytes());
+    buf.push(z as u8);
+    buf.push(direction);
+    buf.extend_from_slice(&hue.to_be_bytes());
+    buf.push(flags);
+    buf.push(notoriety);
+
+    for item in equip {
+        let item_serial = if item.hue != 0 { item.serial | 0x8000_0000 } else { item.serial };
+        buf.extend_from_slice(&item_serial.to_be_bytes());
+        buf.extend_from_slice(&item.graphic.to_be_bytes());
+        buf.push(item.layer);
+        if item.hue != 0 {
+            buf.extend_from_slice(&item.hue.to_be_bytes());
+        }
+    }
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
     buf
 }
 

@@ -54,6 +54,7 @@ pub mod pathfinding;
 pub mod char_slots;
 pub mod world_state;
 pub mod npc;
+pub mod spawn_loader;
 
 fn main() {
     env_logger::init();
@@ -131,6 +132,22 @@ fn main() {
         movement::Position { x: 1500, y: 1640, z: 10 }, // ~12 tiles south of Britain bank
     ));
     info!("Spawned Dragon (serial 0x{:08X}) at (1500, 1640)", npc::NPC_SERIAL_BASE);
+
+    npc_manager.spawn(npc::Npc::banker(
+        npc::BANKER_SERIAL,
+        movement::Position { x: 1440, y: 1666, z: 0 }, // Britain bank teller
+    ));
+    info!("Spawned Banker (serial 0x{:08X}) at (1440, 1666)", npc::BANKER_SERIAL);
+
+    // Load ServUO spawn data if available.
+    let serv_uo_dir = std::env::var("SERV_UO_DIR").unwrap_or_else(|_| {
+        "C:/Users/EdoardoCiccarelli/Downloads/ServUO-pub57/ServUO-pub57".to_string()
+    });
+    let felucca_xml = format!("{serv_uo_dir}/Spawns/felucca.xml");
+    match spawn_loader::load_from_xml(&felucca_xml, &npc_manager, 0x0000_2000) {
+        Ok(n) => info!("Loaded {} NPCs from {}", n, felucca_xml),
+        Err(e) => log::warn!("Could not load spawn data (set SERV_UO_DIR to fix): {}", e),
+    }
 
     if let Err(e) = tcp::start(connections, map_data, npc_manager) {
         error!("Error from TCP: {}", e);
