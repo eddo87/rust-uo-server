@@ -39,6 +39,15 @@ fn required_packet_length(id: u8, buf: &[u8]) -> Option<usize> {
         0x05 => Some(5),  // attack request
         0x06 => Some(5),  // double-click (ignored for now)
         0x09 => Some(5),  // single-click (ignored for now)
+        0x34 => Some(10), // MobileQuery: stats/skills request
+        0xB5 => {         // ChatSystemJoin (variable length)
+            if buf.len() < 3 { return None; }
+            Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
+        }
+        0xBF => {         // GeneralInformation (variable length)
+            if buf.len() < 3 { return None; }
+            Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
+        }
         0x5D => Some(73), // character select
         0x72 => Some(5),  // war mode (client → server)
         0x73 => Some(2),  // ping
@@ -49,7 +58,12 @@ fn required_packet_length(id: u8, buf: &[u8]) -> Option<usize> {
             if buf.len() < 3 { return None; }
             Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
         }
+        0xD6 => {         // BatchQueryProperties (variable length)
+            if buf.len() < 3 { return None; }
+            Some(u16::from_be_bytes([buf[1], buf[2]]) as usize)
+        }
         0xEF => Some(21), // encrypted login seed
+        0xF8 => Some(106), // create character (7.0.16+ clients)
         _ => None,        // unknown: caller should drain & stop
     }
 }
@@ -60,11 +74,14 @@ fn required_packet_length(id: u8, buf: &[u8]) -> Option<usize> {
 
 async fn write_loop(mut stream: TcpStream, rx: Receiver<Vec<u8>>) {
     while let Ok(packet) = rx.recv().await {
+        trace!("write_loop: sending {} bytes to {}", packet.len(), stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
         if stream.write_all(&packet).await.is_err() {
+            debug!("write_loop: write_all failed, closing");
             break;
         }
         let _ = stream.flush().await;
     }
+    debug!("write_loop: exited");
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +234,7 @@ async fn handle_packet(
     // `packet` includes the ID byte; body starts at index 1.
     let body = if packet.len() > 1 { &packet[1..] } else { &[] as &[u8] };
 
-    debug!("Connection {}: handling packet 0x{:02X}", conn_id, id);
+    trace!("Connection {}: handling packet 0x{:02X}", conn_id, id);
 
     match id {
         // -- Login phase -------------------------------------------------
@@ -247,7 +264,10 @@ async fn handle_packet(
                 let _ = c.transition_to(ConnectionState::Authenticating);
                 let _ = c.transition_to(ConnectionState::ServerSelect);
             });
-            connections.send_to(conn_id, packets::server_list_packet().to_vec());
+            let pkt = packets::server_list_packet().to_vec();
+            trace!("Connection {}: server_list_packet bytes: {:02X?}", conn_id, &pkt);
+            let sent = connections.send_to(conn_id, pkt);
+            debug!("Connection {}: server_list_packet queued={}", conn_id, sent);
         }
 
         0xA0 => {
@@ -327,6 +347,69 @@ async fn handle_packet(
             }
 
             // Send 0x78 for each nearby NPC so the arriving player can see them.
+            for npc in npc_manager.get_nearby(enter_pos, 18) {
+                let pkt = packets::mobile_incoming_packet(
+                    npc.serial, npc.body_type,
+                    npc.position.x, npc.position.y, npc.position.z,
+                    npc.direction, npc.hue, npc.flags, npc.notoriety,
+                );
+                connections.send_to(conn_id, compress_packet(&pkt));
+            }
+        }
+
+        0xF8 => {
+            // Create character (7.0.16+ clients) — fixed 106 bytes.
+            // Layout after the ID byte:
+            //   [0..8]  : pattern / unknown bytes
+            //   [8..38] : character name (30 bytes, null-padded ASCII)
+            //   [38..]  : stats, skills, hue, hair, start city (not parsed yet)
+            if body.len() < 38 { return Ok(()); }
+            let raw = &body[8..38];
+            let name_end = raw.iter().position(|&b| b == 0).unwrap_or(30);
+            let char_name = String::from_utf8_lossy(&raw[..name_end]).trim().to_string();
+            let char_name = if char_name.is_empty() { "Adventurer".to_string() } else { char_name };
+
+            // Slot 0 → serial 0x00000001 (same as 0x5D with slot 0)
+            let serial = 0x00000001u32;
+            let enter_pos = Position { x: 1496, y: 1628, z: 10 };
+            let character = Character::new_default(serial, char_name.clone());
+
+            connections.with_connection_mut(conn_id, |c| {
+                c.set_character_name(char_name.clone());
+                c.set_position(enter_pos);
+                c.serial = serial;
+                let _ = c.transition_to(ConnectionState::InGame);
+                c.character = Some(character.clone());
+            });
+            info!("Character created: {} (serial 0x{:08X})", char_name, serial);
+
+            send_login_init_sequence(conn_id, connections, &character);
+
+            let announce_pkt = packets::mobile_incoming_packet(
+                serial, 0x0190, enter_pos.x, enter_pos.y, enter_pos.z,
+                0x00, 0x0000, 0x00, 0x03,
+            );
+            connections.broadcast_to_range(conn_id, enter_pos, 18, compress_packet(&announce_pkt));
+
+            let nearby: Vec<(u32, Position)> = connections
+                .get_all_connections()
+                .into_iter()
+                .filter(|c| c.id != conn_id && c.state == ConnectionState::InGame)
+                .filter_map(|c| {
+                    c.position.and_then(|p| {
+                        let dx = (p.x as i32 - enter_pos.x as i32).unsigned_abs() as u16;
+                        let dy = (p.y as i32 - enter_pos.y as i32).unsigned_abs() as u16;
+                        if dx <= 18 && dy <= 18 { Some((c.serial, p)) } else { None }
+                    })
+                })
+                .collect();
+            for (s, p) in nearby {
+                let pkt = packets::mobile_incoming_packet(
+                    s, 0x0190, p.x, p.y, p.z, 0x00, 0x0000, 0x00, 0x03,
+                );
+                connections.send_to(conn_id, compress_packet(&pkt));
+            }
+
             for npc in npc_manager.get_nearby(enter_pos, 18) {
                 let pkt = packets::mobile_incoming_packet(
                     npc.serial, npc.body_type,
@@ -586,6 +669,16 @@ async fn handle_packet(
         }
 
         0x09 => { /* single-click — ignored */ }
+
+        0x34 => {
+            // MobileQuery — client requests stats (type=4) or skills (type=5)
+            // for a serial. Respond with the status bar for the requesting player.
+            if let Some(pkt) = build_status_packet_for(conn_id, connections) {
+                connections.send_to(conn_id, compress_packet(&pkt));
+            }
+        }
+
+        0xB5 | 0xBF => { /* client feature/chat notifications — no response needed */ }
 
         0x72 => {
             // War mode toggle from client: [war_flag, unk, unk, unk]
