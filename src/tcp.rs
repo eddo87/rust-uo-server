@@ -17,6 +17,7 @@ use crate::connections::ConnectionManager;
 use crate::connection::ConnectionState;
 use crate::map_files::MapData;
 use crate::movement::{Direction, MovementRequest, Position};
+use crate::npc::NpcManager;
 
 mod packets;
 
@@ -74,6 +75,7 @@ async fn connection_loop(
     mut stream: TcpStream,
     connections: ConnectionManager,
     map_data: Arc<Option<MapData>>,
+    npc_manager: NpcManager,
 ) -> Result<()> {
     let addr = stream.peer_addr()?;
     let conn_id = connections.add_connection(addr);
@@ -100,7 +102,7 @@ async fn connection_loop(
             }
             Ok(n) => {
                 acc.extend_from_slice(&read_buf[..n]);
-                if let Err(e) = process_accumulator(&mut acc, conn_id, &connections, &map_data).await {
+                if let Err(e) = process_accumulator(&mut acc, conn_id, &connections, &map_data, &npc_manager).await {
                     warn!("Connection {} packet error: {}", conn_id, e);
                 }
             }
@@ -123,6 +125,7 @@ async fn process_accumulator(
     conn_id: u64,
     connections: &ConnectionManager,
     map_data: &Arc<Option<MapData>>,
+    npc_manager: &NpcManager,
 ) -> Result<()> {
     loop {
         if acc.is_empty() {
@@ -145,7 +148,7 @@ async fn process_accumulator(
         }
         let packet = acc[..len].to_vec();
         acc.drain(..len);
-        if let Err(e) = handle_packet(id, &packet, conn_id, connections, map_data).await {
+        if let Err(e) = handle_packet(id, &packet, conn_id, connections, map_data, npc_manager).await {
             warn!("Connection {} error handling 0x{:02X}: {}", conn_id, id, e);
         }
     }
@@ -156,6 +159,7 @@ async fn accept_loop(
     addr: impl ToSocketAddrs,
     connections: ConnectionManager,
     map_data: Arc<Option<MapData>>,
+    npc_manager: NpcManager,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("TCP listener bound, waiting for connections");
@@ -166,14 +170,19 @@ async fn accept_loop(
         info!("Connection received from: {}", addr);
         let conns = connections.clone();
         let map = map_data.clone();
-        task::spawn(connection_loop(stream, conns, map));
+        let npcs = npc_manager.clone();
+        task::spawn(connection_loop(stream, conns, map, npcs));
     }
     Ok(())
 }
 
-pub fn start(connections: ConnectionManager, map_data: Arc<Option<MapData>>) -> Result<()> {
+pub fn start(
+    connections: ConnectionManager,
+    map_data: Arc<Option<MapData>>,
+    npc_manager: NpcManager,
+) -> Result<()> {
     info!("Starting TCP server on 127.0.0.1:2593");
-    task::block_on(accept_loop("127.0.0.1:2593", connections, map_data))
+    task::block_on(accept_loop("127.0.0.1:2593", connections, map_data, npc_manager))
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +212,7 @@ async fn handle_packet(
     conn_id: u64,
     connections: &ConnectionManager,
     map_data: &Arc<Option<MapData>>,
+    npc_manager: &NpcManager,
 ) -> Result<()> {
     // `packet` includes the ID byte; body starts at index 1.
     let body = if packet.len() > 1 { &packet[1..] } else { &[] as &[u8] };
@@ -311,6 +321,16 @@ async fn handle_packet(
                 );
                 connections.send_to(conn_id, compress_packet(&pkt));
             }
+
+            // Send 0x78 for each nearby NPC so the arriving player can see them.
+            for npc in npc_manager.get_nearby(enter_pos, 18) {
+                let pkt = packets::mobile_incoming_packet(
+                    npc.serial, npc.body_type,
+                    npc.position.x, npc.position.y, npc.position.z,
+                    npc.direction, npc.hue, npc.flags, npc.notoriety,
+                );
+                connections.send_to(conn_id, compress_packet(&pkt));
+            }
         }
 
         // -- In-game ----------------------------------------------------
@@ -384,11 +404,6 @@ async fn handle_packet(
                 .unwrap_or((false, false));
             if !attacker_alive || !atk_war_mode { return Ok(()); }
 
-            // Locate target connection
-            let Some(target_id) = connections.find_by_serial(target_serial) else {
-                return Ok(());
-            };
-
             // Collect attacker combat data (clone to release lock before touching target)
             let attacker_snap = connections.get_connection(conn_id);
             let Some(ref atk) = attacker_snap else { return Ok(()); };
@@ -417,27 +432,7 @@ async fn handle_packet(
                 .map(|e| e.value)
                 .unwrap_or(0.0);
 
-            // Collect target position for range check
-            let target_snap = connections.get_connection(target_id);
-            let Some(ref tgt) = target_snap else { return Ok(()); };
-            let Some(ref tgt_ch) = tgt.character else { return Ok(()); };
-            if !tgt_ch.is_alive { return Ok(()); }
-            let tgt_pos = tgt.position.unwrap_or(Position { x: 1496, y: 1628, z: 10 });
-            let tgt_skill = tgt_ch.skills
-                .get(&crate::character::Skill::Wrestling)
-                .map(|e| e.value)
-                .unwrap_or(0.0);
-            let tgt_name = tgt_ch.name.clone();
-
-            // Range check: melee requires Chebyshev distance ≤ 2
-            let dx = (atk_pos.x as i32 - tgt_pos.x as i32).unsigned_abs() as u16;
-            let dy = (atk_pos.y as i32 - tgt_pos.y as i32).unsigned_abs() as u16;
-            if dx > 2 || dy > 2 {
-                debug!("Attack out of range: {} → serial {}", conn_id, target_serial);
-                return Ok(());
-            }
-
-            // Resolve combat round (unarmed / fists)
+            // Unarmed / fists weapon stats
             let weapon = WeaponStats {
                 min_damage: 3,
                 max_damage: 8,
@@ -445,51 +440,114 @@ async fn handle_packet(
                 weapon_type: WeaponType::Fists,
                 range: 1,
             };
-            let armor = ArmorStats {
-                physical_resist: 0,
-                fire_resist: 0,
-                cold_resist: 0,
-                poison_resist: 0,
-                energy_resist: 0,
-            };
-            let result = resolve_combat_round(atk_skill, &weapon, atk_str, tgt_skill, &armor);
 
-            if result.was_hit {
-                // Apply damage to target
-                let (new_hp, max_hp, target_died) = connections
-                    .with_connection_mut(target_id, |c| {
-                        if let Some(ref mut ch) = c.character {
-                            ch.damage(result.damage_dealt);
-                            let hp = ch.derived_stats.hit_points;
-                            (hp.current, hp.max, !ch.is_alive)
-                        } else {
-                            (0, 0, false)
-                        }
-                    })
-                    .unwrap_or((0, 0, false));
+            if let Some(target_id) = connections.find_by_serial(target_serial) {
+                // --- Player target ---
+                let target_snap = connections.get_connection(target_id);
+                let Some(ref tgt) = target_snap else { return Ok(()); };
+                let Some(ref tgt_ch) = tgt.character else { return Ok(()); };
+                if !tgt_ch.is_alive { return Ok(()); }
+                let tgt_pos = tgt.position.unwrap_or(Position { x: 1496, y: 1628, z: 10 });
+                let tgt_skill = tgt_ch.skills
+                    .get(&crate::character::Skill::Wrestling)
+                    .map(|e| e.value)
+                    .unwrap_or(0.0);
+                let tgt_name = tgt_ch.name.clone();
 
-                info!(
-                    "Combat: conn {} hit {} for {} dmg (HP {}/{})",
-                    conn_id, tgt_name, result.damage_dealt, new_hp, max_hp
+                // Range check: melee requires Chebyshev distance ≤ 2
+                let dx = (atk_pos.x as i32 - tgt_pos.x as i32).unsigned_abs() as u16;
+                let dy = (atk_pos.y as i32 - tgt_pos.y as i32).unsigned_abs() as u16;
+                if dx > 2 || dy > 2 {
+                    debug!("Attack out of range: {} → player serial {}", conn_id, target_serial);
+                    return Ok(());
+                }
+
+                let armor = ArmorStats {
+                    physical_resist: 0,
+                    fire_resist: 0,
+                    cold_resist: 0,
+                    poison_resist: 0,
+                    energy_resist: 0,
+                };
+                let result = resolve_combat_round(atk_skill, &weapon, atk_str, tgt_skill, &armor);
+
+                if result.was_hit {
+                    let (new_hp, max_hp, target_died) = connections
+                        .with_connection_mut(target_id, |c| {
+                            if let Some(ref mut ch) = c.character {
+                                ch.damage(result.damage_dealt);
+                                let hp = ch.derived_stats.hit_points;
+                                (hp.current, hp.max, !ch.is_alive)
+                            } else {
+                                (0, 0, false)
+                            }
+                        })
+                        .unwrap_or((0, 0, false));
+
+                    info!(
+                        "Combat: conn {} hit {} for {} dmg (HP {}/{})",
+                        conn_id, tgt_name, result.damage_dealt, new_hp, max_hp
+                    );
+
+                    let dmg_pkt = packets::damage_notification_packet(target_serial, result.damage_dealt as u16);
+                    connections.send_to(conn_id, compress_packet(&dmg_pkt));
+
+                    if let Some(status_pkt) = build_status_packet_for(target_id, connections) {
+                        let compressed = compress_packet(&status_pkt);
+                        connections.send_to(target_id, compressed.clone());
+                        connections.broadcast_to_range(target_id, tgt_pos, 18, compressed);
+                    }
+
+                    if target_died {
+                        info!("Player {} died", tgt_name);
+                        connections.send_to(target_id, compress_packet(&packets::ghost_mode_packet()));
+                    }
+                } else {
+                    debug!("Combat: conn {} missed player serial {}", conn_id, target_serial);
+                }
+            } else if let Some(npc_snap) = npc_manager.get(target_serial) {
+                // --- NPC target ---
+                if !npc_snap.is_alive { return Ok(()); }
+
+                // Range check
+                let dx = (atk_pos.x as i32 - npc_snap.position.x as i32).unsigned_abs() as u16;
+                let dy = (atk_pos.y as i32 - npc_snap.position.y as i32).unsigned_abs() as u16;
+                if dx > 2 || dy > 2 {
+                    debug!("Attack out of range: {} → NPC serial {}", conn_id, target_serial);
+                    return Ok(());
+                }
+
+                let result = resolve_combat_round(
+                    atk_skill, &weapon, atk_str,
+                    npc_snap.defense_skill, &npc_snap.armor,
                 );
 
-                // Notify attacker of damage dealt (0x0B)
-                let dmg_pkt = packets::damage_notification_packet(target_serial, result.damage_dealt as u16);
-                connections.send_to(conn_id, compress_packet(&dmg_pkt));
+                if result.was_hit {
+                    let Some((new_hp, _max_hp, npc_died)) =
+                        npc_manager.apply_damage(target_serial, result.damage_dealt as i32)
+                    else {
+                        return Ok(());
+                    };
+                    info!(
+                        "Combat: conn {} hit NPC {} for {} dmg (HP {})",
+                        conn_id, npc_snap.name, result.damage_dealt, new_hp
+                    );
 
-                // Send updated status bar to target and broadcast to nearby
-                if let Some(status_pkt) = build_status_packet_for(target_id, connections) {
-                    let compressed = compress_packet(&status_pkt);
-                    connections.send_to(target_id, compressed.clone());
-                    connections.broadcast_to_range(target_id, tgt_pos, 18, compressed);
-                }
+                    let dmg_pkt = packets::damage_notification_packet(
+                        target_serial, result.damage_dealt as u16,
+                    );
+                    connections.send_to(conn_id, compress_packet(&dmg_pkt));
 
-                if target_died {
-                    info!("Player {} died", tgt_name);
-                    connections.send_to(target_id, compress_packet(&packets::ghost_mode_packet()));
+                    if npc_died {
+                        info!("NPC {} (serial 0x{:08X}) died", npc_snap.name, target_serial);
+                        let remove_pkt = packets::remove_entity_packet(target_serial);
+                        let compressed = compress_packet(&remove_pkt);
+                        connections.send_to(conn_id, compressed.clone());
+                        connections.broadcast_to_range(conn_id, atk_pos, 18, compressed);
+                    }
+                } else {
+                    debug!("Combat: conn {} missed NPC serial {}", conn_id, target_serial);
                 }
-            } else {
-                debug!("Combat: conn {} missed serial {}", conn_id, target_serial);
             }
         }
 

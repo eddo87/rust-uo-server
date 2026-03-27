@@ -53,6 +53,7 @@ pub mod quests;
 pub mod pathfinding;
 pub mod char_slots;
 pub mod world_state;
+pub mod npc;
 
 fn main() {
     env_logger::init();
@@ -123,7 +124,15 @@ fn main() {
 
     let connections = connections::ConnectionManager::new();
 
-    if let Err(e) = tcp::start(connections, map_data) {
+    // Spawn static test NPCs
+    let npc_manager = npc::NpcManager::new();
+    npc_manager.spawn(npc::Npc::dragon(
+        npc::NPC_SERIAL_BASE,
+        movement::Position { x: 1500, y: 1640, z: 10 }, // ~12 tiles south of Britain bank
+    ));
+    info!("Spawned Dragon (serial 0x{:08X}) at (1500, 1640)", npc::NPC_SERIAL_BASE);
+
+    if let Err(e) = tcp::start(connections, map_data, npc_manager) {
         error!("Error from TCP: {}", e);
     }
 

@@ -235,6 +235,16 @@ pub fn parse_character_select(data: &[u8]) -> Option<(u32, String)> {
     Some((slot, name))
 }
 
+/// Builds a Remove Entity packet (0x1D).
+///
+/// Sent to clients to remove a mobile or item from their view (e.g. on death).
+pub fn remove_entity_packet(serial: u32) -> [u8; 5] {
+    let mut buf = [0u8; 5];
+    buf[0] = 0x1D;
+    BigEndian::write_u32(&mut buf[1..5], serial);
+    buf
+}
+
 /// Builds a Resurrect packet (0x2C) to restore a ghost to living status.
 pub fn resurrect_packet() -> [u8; 2] { [0x2C, 0x01] }
 
