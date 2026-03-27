@@ -263,10 +263,14 @@ async fn handle_packet(
             let mut slice = body;
             let username = handle_post_login_packet(&mut slice)?;
             connections.with_connection_mut(conn_id, |c| {
-                // After a redirect the client reconnects; walk the new
-                // connection up to GameLogin before we send features.
+                // After a redirect the client reconnects and sends 0x91.
+                // If it sent 0xEF first state is LoginSeed; if it sent the
+                // raw auth key (null-skipped) state is still Connecting.
+                // Walk to GameLogin from whichever starting point we're at.
                 if c.state == ConnectionState::Connecting {
                     let _ = c.transition_to(ConnectionState::LoginSeed);
+                }
+                if c.state == ConnectionState::LoginSeed {
                     let _ = c.transition_to(ConnectionState::Authenticating);
                     let _ = c.transition_to(ConnectionState::ServerSelect);
                     let _ = c.transition_to(ConnectionState::GameLogin);

@@ -23,7 +23,10 @@ pub fn server_redirect_packet() -> [u8; 11] {
     buffer[0] = 0x8C;
     buffer[1] = 0x7F; buffer[2] = 0x00; buffer[3] = 0x00; buffer[4] = 0x01;
     buffer[5] = 0x0A; buffer[6] = 0x21;
-    buffer[7] = 0x43; buffer[8] = 0x2F; buffer[9] = 0x3F; buffer[10] = 0xF0;
+    // Auth key must start with a known-or-skippable byte.
+    // 0x00 bytes are consumed as 1-byte null skips by the accumulator,
+    // so the client's 4-byte seed handshake is harmlessly drained before 0x91.
+    buffer[7] = 0x00; buffer[8] = 0x00; buffer[9] = 0x00; buffer[10] = 0x00;
     buffer
 }
 
